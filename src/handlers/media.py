@@ -9,6 +9,7 @@ from src.keyboards.media_kb import get_media_main_keyboard, get_task_keyboard
 from src.keyboards.moderation_kb import get_moderation_keyboard
 from src.utils.logger import logger
 from src.database.models import User, Submission
+from src.database.models.submission import SubmissionStatus
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 from aiogram.exceptions import TelegramBadRequest
@@ -49,7 +50,7 @@ async def show_active_tasks(
                 # Если задание уже взято, показываем кнопку "Отправить текст"
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(
-                        text="Отправить текст",
+                        text="📝 Отправить текст",
                         callback_data=f"submit_task_{task.id}"
                     )
                 ]])
@@ -57,7 +58,7 @@ async def show_active_tasks(
                 # Если задание не взято, показываем кнопку "Взять в работу"
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(
-                        text="Взять в работу",
+                        text="✅ Взять в работу",
                         callback_data=f"take_task_{task.id}"
                     )
                 ]])
@@ -70,7 +71,7 @@ async def show_active_tasks(
                         photo=task.photo,
                         caption=(
                             f"Задание #{task.id}\n"
-                            f"Пресс-релиз: {task.press_release_link}\n"
+                            f"Пресс-релиз: {task.press_release_link[:300] + '...' if len(task.press_release_link) > 300 else task.press_release_link}\n"
                             f"Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}"
                         ),
                         reply_markup=keyboard
@@ -80,14 +81,14 @@ async def show_active_tasks(
                     logging.error(f"Error sending photo for task {task.id}: {str(e)}", exc_info=True)
                     await callback.message.answer(
                         f"Задание #{task.id}\n"
-                        f"Пресс-релиз: {task.press_release_link}\n"
+                        f"Пресс-релиз: {task.press_release_link[:300] + '...' if len(task.press_release_link) > 300 else task.press_release_link}\n"
                         f"Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}",
                         reply_markup=keyboard
                     )
             else:  # Если фото нет, отправляем просто текст
                 await callback.message.answer(
                     f"Задание #{task.id}\n"
-                    f"Пресс-релиз: {task.press_release_link}\n"
+                    f"Пресс-релиз: {task.press_release_link[:300] + '...' if len(task.press_release_link) > 300 else task.press_release_link}\n"
                     f"Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}",
                     reply_markup=keyboard
                 )
@@ -120,23 +121,29 @@ async def take_task(
         if existing_assignment:
             await callback.answer("Задание уже взято другим представителем вашего СМИ")
             return
+            
+        # Проверяем, нет ли уже одобренной публикации от этого СМИ
+        has_completed_submission = await task_service.check_media_outlet_submission(task_id, user.media_outlet)
+        if has_completed_submission:
+            await callback.answer("Ваше СМИ уже выполнило это задание")
+            return
         
         # Пытаемся назначить задание
         assignment = await task_service.assign_task(task_id, user.media_outlet)
         
         if not assignment:
-            await callback.answer("Задание уже взято другим представителем вашего СМИ")
+            await callback.answer("Не удалось взять задание. Возможно, оно уже выполнено или взято в работу.")
             return
         
         # Отправляем уведомление пользователю с кнопкой "Отправить текст"
         await bot.send_message(
             user.telegram_id,
             f"✅ Вы взяли задание #{task_id} в работу\n"
-            f"Пресс-релиз: {task.press_release_link}\n"
+            f"Пресс-релиз: {task.press_release_link[:300] + '...' if len(task.press_release_link) > 300 else task.press_release_link}\n"
             f"Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(
-                    text="Отправить текст",
+                    text="📝 Отправить текст",
                     callback_data=f"submit_task_{task_id}"
                 )
             ]])
@@ -147,37 +154,6 @@ async def take_task(
     except Exception as e:
         logging.error(f"Error in take_task: {e}", exc_info=True)
         await callback.answer("Произошла ошибка при взятии задания")
-
-@router.message(TaskStates.waiting_for_submission)
-async def handle_submission(
-    message: Message, 
-    state: FSMContext, 
-    session: AsyncSession,
-    user: User,
-    bot: Bot
-):
-    try:
-        if not message.photo:
-            await message.answer("Пожалуйста, прикрепите фото к публикации.")
-            return
-        
-        # Получаем данные из состояния
-        data = await state.get_data()
-        submission_id = data.get('submission_id')
-        
-        # Сохраняем фото и переходим в состояние ожидания текста
-        photo = message.photo[-1].file_id
-        await state.update_data(photo=photo)
-        await state.set_state(TaskStates.waiting_for_text)
-        await message.answer("Пожалуйста, отправьте текст публикации:")
-        
-    except Exception as e:
-        logging.error(f"Error in handle_submission: {e}", exc_info=True)
-        await message.answer(
-            "Произошла ошибка при отправке публикации",
-            reply_markup=get_media_main_keyboard()
-        )
-        await state.clear()
 
 @router.callback_query(F.data == "my_submissions")
 async def show_user_submissions(
@@ -242,21 +218,22 @@ async def handle_submit_task(
             await callback.answer("Вы не можете отправить текст для этого задания", show_alert=True)
             return
         
-        # Сохраняем ID задания в состоянии
-        await state.update_data(task_id=task_id)
+        # Устанавливаем состояние ожидания текста
+        await state.set_state(TaskStates.waiting_for_text)
         
-        # Переводим пользователя в состояние ожидания фото
-        await state.set_state(TaskStates.waiting_for_submission)
+        # Разрешаем отправку текста и убираем блокировку
+        await state.set_data({
+            'task_id': task_id,
+            'can_send_text': True,
+            'is_blocked': False
+        })
         
-        await callback.message.answer(
-            "Пожалуйста, прикрепите фото к публикации.",
-            reply_markup=ReplyKeyboardRemove()
-        )
+        await callback.message.answer("❌ Пожалуйста, отправьте текст публикации:")
         await callback.answer()
         
     except Exception as e:
         logging.error(f"Error in handle_submit_task: {e}", exc_info=True)
-        await callback.answer("Произошла ошибка при обработке запроса")
+        await callback.answer("Произошла ошибка при обработке запроса", show_alert=True)
 
 @router.callback_query(F.data.startswith("submit_revision_"))
 async def handle_revision_request(
@@ -267,7 +244,7 @@ async def handle_revision_request(
     try:
         submission_id = int(callback.data.split("_")[2])
         
-        # Получаем задание, связанное с этой публикацией
+        # Получаем публикацию
         submission_service = SubmissionService(session)
         submission = await submission_service.get_submission(submission_id)
         
@@ -275,276 +252,38 @@ async def handle_revision_request(
             await callback.answer("Публикация не найдена", show_alert=True)
             return
         
+        # Определяем тип контента для доработки
+        is_photo_revision = submission.previous_status == SubmissionStatus.TEXT_APPROVED.value
+        
         # Сохраняем submission_id и task_id в состоянии
         await state.update_data(
             submission_id=submission_id,
-            task_id=submission.task_id
+            task_id=submission.task_id,
+            is_photo_revision=is_photo_revision,
+            can_send_text=False  # Устанавливаем флаг в False, пока не нажата кнопка
         )
         
-        # Переходим сразу в состояние ожидания фото
-        await state.set_state(TaskStates.waiting_for_submission)
-        
-        await callback.message.answer("Пожалуйста, прикрепите фото к публикации.")
+        # Переходим в соответствующее состояние
+        if is_photo_revision:
+            await state.set_state(TaskStates.waiting_for_photo)
+            await callback.message.answer("❌ Пожалуйста, отправьте исправленное фото.")
+        else:
+            await state.set_state(TaskStates.waiting_for_text)
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить текст",
+                    callback_data="send_text"
+                )
+            ]])
+            await callback.message.answer(
+                "❌ Для отправки текста нажмите кнопку ниже:",
+                reply_markup=keyboard
+            )
         await callback.answer()
         
     except Exception as e:
         logging.error(f"Error in handle_revision_request: {e}", exc_info=True)
         await callback.answer("Произошла ошибка при обработке запроса", show_alert=True)
-
-@router.callback_query(F.data.startswith("send_link_"))
-async def request_published_link(callback: CallbackQuery, state: FSMContext):
-    submission_id = int(callback.data.split("_")[2])
-    
-    await state.set_state(TaskStates.waiting_for_link)
-    await state.update_data(submission_id=submission_id)
-    
-    await callback.message.answer(
-        "Пожалуйста, отправьте ссылку на опубликованный материал:"
-    )
-    await callback.answer()
-
-@router.message(TaskStates.waiting_for_link)
-async def handle_published_link(message: Message, state: FSMContext, session: AsyncSession):
-    data = await state.get_data()
-    submission_id = data['submission_id']
-    
-    submission_service = SubmissionService(session)
-    await submission_service.add_published_link(submission_id, message.text)
-    
-    await message.answer(
-        "✅ Спасибо! Ссылка на публикацию добавлена.\n"
-        "Задание выполнено."
-    )
-    await state.clear()
-
-@router.message(Command("tasks"))
-async def cmd_tasks(message: Message, session: AsyncSession, user):
-    task_service = TaskService(session)
-    tasks = await task_service.get_active_tasks()
-    
-    if not tasks:
-        await message.answer("Нет активных заданий")
-        return
-    
-    for task in tasks:
-        # Проверяем статус задания для текущего СМИ
-        assignment = await task_service.get_task_assignment(task.id, user.media_outlet)
-        status = assignment.status if assignment else "new"
-        
-        deadline = task.deadline.strftime("%Y-%m-%d %H:%M")
-        status_text = {
-            'new': '🆕 Новое',
-            'in_progress': '🔄 В работе',
-            'completed': '✅ Выполнено'
-        }.get(status, status)
-        
-        # Показываем кнопки в зависимости от статуса
-        keyboard = None
-        if status == 'new':
-            keyboard = get_task_keyboard(task.id)
-        elif status == 'in_progress':
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="📝 Отправить текст",
-                    callback_data=f"send_text_{task.id}"
-                )
-            ]])
-        
-        await message.answer(
-            f"Задание #{task.id}\n"
-            f"Пресс-релиз: {task.press_release_link}\n"
-            f"Дедлайн: {deadline}\n"
-            f"Статус: {status_text}",
-            reply_markup=keyboard
-        )
-
-@router.message(Command("submissions"))
-async def cmd_submissions(message: Message, session: AsyncSession, user):
-    try:
-        submission_service = SubmissionService(session)
-        submissions = await submission_service.get_user_submissions(user.id)
-        
-        if not submissions:
-            await message.answer(
-                "У вас пока нет публикаций",
-                reply_markup=get_media_main_keyboard()
-            )
-            return
-        
-        await message.answer(
-            "Ваши публикации:",
-            reply_markup=get_media_main_keyboard()
-        )
-        
-        for submission in submissions:
-            status_text = {
-                'pending': '🕒 На проверке',
-                'approved': '✅ Одобрено',
-                'revision': '📝 Требует доработки',
-                'completed': '✅ Опубликовано'
-            }.get(submission.status, submission.status)
-            
-            text = (
-                f"Публикация #{submission.id}\n"
-                f"Статус: {status_text}\n"
-                f"Дата отправки: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}\n"
-            )
-            
-            if submission.revision_comment:
-                text += f"Комментарий: {submission.revision_comment}\n"
-            
-            if submission.published_link:
-                text += f"Ссылка на публикацию: {submission.published_link}\n"
-            
-            keyboard = None
-            if submission.status == 'revision':
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Отправить исправленный текст",
-                        callback_data=f"submit_revision_{submission.id}"
-                    )
-                ]])
-            
-            await message.answer(text, reply_markup=keyboard)
-    
-    except Exception as e:
-        logging.error(f"Ошибка в обработчике cmd_submissions: {e}", exc_info=True)
-        await message.answer("Произошла ошибка при получении публикаций")
-
-@router.message(F.text == "Активные задания")
-async def show_active_tasks(
-    message: Message, 
-    session: AsyncSession,
-    user: User
-):
-    try:
-        task_service = TaskService(session)
-        tasks = await task_service.get_active_tasks()
-        
-        if not tasks:
-            await message.answer(
-                "Нет активных заданий",
-                reply_markup=get_media_main_keyboard()
-            )
-            return
-        
-        for task in tasks:
-            # Проверяем, взято ли задание текущим пользователем
-            assignment = await task_service.get_task_assignment(task.id, user.media_outlet)
-            
-            # Формируем текст сообщения
-            text = (
-                f"Задание #{task.id}\n"
-                f"Пресс-релиз: {task.press_release_link}\n"
-                f"Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}"
-            )
-            
-            # Формируем клавиатуру
-            if assignment:
-                # Если задание уже взято, показываем кнопку "Отправить текст"
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Отправить текст",
-                        callback_data=f"submit_task_{task.id}"
-                    )
-                ]])
-            else:
-                # Если задание не взято, показываем кнопку "Взять в работу"
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Взять в работу",
-                        callback_data=f"take_task_{task.id}"
-                    )
-                ]])
-            
-            # Отправляем сообщение с фото или без
-            if task.photo:
-                await message.answer_photo(
-                    photo=task.photo,
-                    caption=text,
-                    reply_markup=keyboard
-                )
-            else:
-                await message.answer(
-                    text,
-                    reply_markup=keyboard
-                )
-        
-    except Exception as e:
-        logging.error(f"Error in show_active_tasks: {e}", exc_info=True)
-        await message.answer(
-            "Произошла ошибка при загрузке заданий",
-            reply_markup=get_media_main_keyboard()
-        )
-
-@router.message(F.text == "Мои публикации")
-async def handle_my_submissions_button(
-    message: Message, 
-    session: AsyncSession,
-    user: User
-):
-    try:
-        submission_service = SubmissionService(session)
-        submissions = await submission_service.get_user_submissions(user.id)
-        
-        if not submissions:
-            await message.answer(
-                "У вас пока нет отправленных публикаций",
-                reply_markup=get_media_main_keyboard()
-            )
-            return
-        
-        for submission in submissions:
-            status_text = {
-                'pending': '⏳ Ожидает проверки',
-                'approved': '✅ Одобрена',
-                'revision': '📝 Требует доработки',
-                'rejected': '❌ Отклонена'
-            }.get(submission.status, submission.status)
-            
-            # Добавляем кнопки в зависимости от статуса
-            keyboard = None
-            if submission.status == 'revision':
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Отправить исправленный текст",
-                        callback_data=f"submit_revision_{submission.id}"
-                    )
-                ]])
-            elif submission.status == 'approved' and not submission.published_link:
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Отправить ссылку",
-                        callback_data=f"send_link_{submission.id}"
-                    )
-                ]])
-            
-            if submission.photo:  # Если есть фото, отправляем его
-                await message.answer_photo(
-                    photo=submission.photo,
-                    caption=(
-                        f"Задание #{submission.task_id}, Публикация #{submission.id}\n"
-                        f"Статус: {status_text}\n"
-                        f"Текст: {submission.content}\n"
-                        f"Отправлена: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}"
-                    ),
-                    reply_markup=keyboard
-                )
-            else:  # Если фото нет, отправляем просто текст
-                await message.answer(
-                    f"Задание #{submission.task_id}, Публикация #{submission.id}\n"
-                    f"Статус: {status_text}\n"
-                    f"Текст: {submission.content}\n"
-                    f"Отправлена: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}",
-                    reply_markup=keyboard
-                )
-        
-    except Exception as e:
-        logging.error(f"Error in handle_my_submissions_button: {e}", exc_info=True)
-        await message.answer(
-            "Произошла ошибка при получении публикаций",
-            reply_markup=get_media_main_keyboard()
-        )
 
 @router.message(TaskStates.waiting_for_text)
 async def handle_submission_text(
@@ -555,83 +294,420 @@ async def handle_submission_text(
     bot: Bot
 ):
     try:
+        # Проверяем, был ли переход по кнопке
         data = await state.get_data()
-        photo = data['photo']
+        submission_id = data.get('submission_id')
         task_id = data.get('task_id')
-        submission_id = data.get('submission_id')  # Добавляем получение submission_id
         
-        if not task_id:
+        # Если отправка заблокирована или не было нажатия кнопки
+        if data.get('is_blocked') or not data.get('can_send_text', False):
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить текст",
+                    callback_data=f"send_text_{submission_id}" if submission_id else "send_text"
+                )
+            ]])
             await message.answer(
-                "Ошибка: не удалось определить задание",
-                reply_markup=get_media_main_keyboard()
+                "❌ Для отправки текста нажмите кнопку ниже:",
+                reply_markup=keyboard
             )
-            await state.clear()
+            # Блокируем отправку и сохраняем данные
+            await state.set_data({
+                'task_id': task_id,
+                'submission_id': submission_id,
+                'can_send_text': False,
+                'is_blocked': True
+            })
+            return
+
+        # Проверяем длину текста
+        if len(message.text) > 3500:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить текст",
+                    callback_data=f"send_text_{submission_id}" if submission_id else "send_text"
+                )
+            ]])
+            await message.answer(
+                "❌ Текст слишком длинный. Максимальная длина - 3500 символов.",
+                reply_markup=keyboard
+            )
+            # Блокируем отправку и сохраняем данные
+            await state.set_data({
+                'task_id': task_id,
+                'submission_id': submission_id,
+                'can_send_text': False,
+                'is_blocked': True
+            })
             return
         
         submission_service = SubmissionService(session)
         
-        # Если это исправление существующей публикации
         if submission_id:
+            # Проверяем статус публикации перед обновлением
+            submission = await submission_service.get_submission(submission_id)
+            if not submission:
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="Отправить текст",
+                        callback_data=f"send_text_{submission_id}"
+                    )
+                ]])
+                await message.answer(
+                    "❌ Публикация не найдена.",
+                    reply_markup=keyboard
+                )
+                # Блокируем отправку и сохраняем данные
+                await state.set_data({
+                    'task_id': task_id,
+                    'submission_id': submission_id,
+                    'can_send_text': False,
+                    'is_blocked': True
+                })
+                return
+                
+            if submission.status != SubmissionStatus.REVISION.value:
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="Отправить текст",
+                        callback_data=f"send_text_{submission_id}"
+                    )
+                ]])
+                await message.answer(
+                    "❌ Нельзя отправить исправленный текст. Публикация не находится на доработке.",
+                    reply_markup=keyboard
+                )
+                # Блокируем отправку и сохраняем данные
+                await state.set_data({
+                    'task_id': task_id,
+                    'submission_id': submission_id,
+                    'can_send_text': False,
+                    'is_blocked': True
+                })
+                return
+                
             # Обновляем существующую публикацию
             submission = await submission_service.update_submission_content(
                 submission_id=submission_id,
                 content=message.text,
-                photo=photo
+                photo=None  # Фото не меняем
             )
+            action_text = "исправленный "
+            task_id = submission.task_id  # Используем task_id из публикации
         else:
-            # Проверяем, не отправлял ли пользователь уже текст на это задание
-            existing_submission = await submission_service.get_user_submission_for_task(user.id, task_id)
-            if existing_submission:
-                await message.answer(
-                    "Вы уже отправляли текст на это задание.",
-                    reply_markup=get_media_main_keyboard()
-                )
-                await state.clear()
-                return
+            # Проверяем, нет ли уже публикации для этого задания
+            submissions = await submission_service.get_user_submissions(user.id, active_only=True)
+            existing_submission = next((s for s in submissions if s.task_id == task_id), None)
             
+            if existing_submission:
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="Отправить текст",
+                        callback_data="send_text"
+                    )
+                ]])
+                await message.answer(
+                    "❌ У вас уже есть публикация для этого задания. Нельзя создать больше одной публикации.",
+                    reply_markup=keyboard
+                )
+                # Блокируем отправку и сохраняем данные
+                await state.set_data({
+                    'task_id': task_id,
+                    'submission_id': submission_id,
+                    'can_send_text': False,
+                    'is_blocked': True
+                })
+                return
+                
             # Создаем новую публикацию
             submission = await submission_service.create_submission(
                 task_id=task_id,
                 user_id=user.id,
                 content=message.text,
-                photo=photo
+                photo=None
             )
-        
-        if not submission:
-            await message.answer("Задание не найдено или было удалено")
-            await state.clear()
-            return
+            action_text = "новый "
         
         # Уведомляем админов о публикации
         from src.config.users import ADMINS
         for admin in ADMINS:
             try:
-                await bot.send_photo(
+                notification_text = (
+                    f"📨 {action_text}текст для публикации #{submission.id}\n"
+                    f"От: {user.media_outlet}\n"
+                    f"ID пользователя: {user.telegram_id}\n"
+                    f"Имя пользователя: @{user.username}\n"
+                    f"Задание: #{task_id}\n\n"
+                    f"Текст публикации:\n{message.text}"
+                )
+                
+                keyboard = await get_moderation_keyboard(submission.id)
+                
+                await bot.send_message(
                     admin["telegram_id"],
-                    photo=photo,
-                    caption=(
-                        f"📨 {'Исправленная' if submission_id else 'Новая'} публикация #{submission.id}\n"
-                        f"От: {user.media_outlet}\n"
-                        f"ID пользователя: {user.telegram_id}\n"
-                        f"Имя пользователя: @{user.username}\n"
-                        f"Задание: #{task_id}\n"
-                        f"Текст публикации:\n{message.text}"
-                    ),
-                    reply_markup=get_moderation_keyboard(submission.id)
+                    notification_text,
+                    reply_markup=keyboard
                 )
             except Exception as e:
-                print(f"Не удалось отправить уведомление администратору {admin['username']} (ID: {admin['telegram_id']}): {e}")
+                logging.error(f"Не удалось отправить уведомление администратору {admin['username']} (ID: {admin['telegram_id']}): {e}")
         
         await message.answer(
-            f"✅ Публикация {'обновлена' if submission_id else 'отправлена на проверку'}",
+            f"✅ {action_text}текст успешно отправлен на проверку. Ожидайте одобрения.",
+            reply_markup=get_media_main_keyboard()
+        )
+        
+        # Полностью очищаем состояние после успешной отправки
+        await state.clear()
+        
+    except Exception as e:
+        logging.error(f"Error in handle_submission_text: {e}", exc_info=True)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Отправить текст",
+                callback_data=f"send_text_{data.get('submission_id')}" if data.get('submission_id') else "send_text"
+            )
+        ]])
+        await message.answer(
+            "❌ Произошла ошибка при отправке текста. Попробуйте снова.",
+            reply_markup=keyboard
+        )
+        # Блокируем отправку и сохраняем данные
+        await state.set_data({
+            'task_id': data.get('task_id'),
+            'submission_id': data.get('submission_id'),
+            'can_send_text': False,
+            'is_blocked': True
+        })
+
+@router.callback_query(F.data.startswith("approve_submission_"))
+async def approve_submission(callback: CallbackQuery, session: AsyncSession, bot: Bot):
+    submission_id = int(callback.data.split("_")[-1])
+    submission_service = SubmissionService(session)
+
+    try:
+        # Получаем публикацию с данными пользователя
+        submission = await submission_service.get_submission_with_user(submission_id)
+        logging.info(f"Processing approval for submission {submission_id}")
+        logging.info(f"Initial status: {submission.status}, Has photo: {bool(submission.photo)}")
+        
+        # Одобряем публикацию
+        submission = await submission_service.approve_submission(submission_id)
+        logging.info(f"After approval status: {submission.status}")
+        
+        # Обновляем сообщение админа
+        message_text = callback.message.text or callback.message.caption
+        if message_text:
+            status_text = "✅ Текст одобрен" if submission.status == SubmissionStatus.TEXT_APPROVED.value else "✅ Публикация полностью одобрена"
+            message_text = message_text.split("\nСтатус:")[0] + f"\nСтатус: {status_text}"
+            
+            try:
+                if callback.message.photo:
+                    await callback.message.edit_caption(
+                        caption=message_text,
+                        reply_markup=callback.message.reply_markup
+                    )
+                else:
+                    await callback.message.edit_text(
+                        text=message_text,
+                        reply_markup=callback.message.reply_markup
+                    )
+            except Exception as e:
+                logging.error(f"Error updating admin message: {e}")
+
+        # Отправляем только уведомление через send_user_notification
+        await send_user_notification(bot, submission)
+        
+        # Отправляем ответ на callback
+        if submission.status == SubmissionStatus.TEXT_APPROVED.value:
+            await callback.answer("Текст одобрен. Ожидаем фото от пользователя.")
+        elif submission.status == SubmissionStatus.APPROVED.value:
+            await callback.answer("Публикация полностью одобрена.")
+        
+    except Exception as e:
+        logging.error(f"Error approving submission: {e}", exc_info=True)
+        await callback.answer("Произошла ошибка при одобрении публикации")
+
+@router.callback_query(F.data.startswith("attach_photo_"))
+async def handle_attach_photo(callback: CallbackQuery, state: FSMContext):
+    try:
+        submission_id = int(callback.data.split("_")[-1])
+        
+        # Сохраняем ID публикации в состоянии
+        await state.update_data(
+            submission_id=submission_id,
+            can_send_photo=False,  # Изначально блокируем отправку фото
+            is_blocked=True
+        )
+        
+        # Переводим пользователя в состояние ожидания фото
+        await state.set_state(TaskStates.waiting_for_photo)
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="📎 Отправить фото",
+                callback_data="send_photo"
+            )
+        ]])
+        
+        await callback.message.answer(
+            "❌ Для отправки фото нажмите кнопку ниже:",
+            reply_markup=keyboard
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logging.error(f"Error in handle_attach_photo: {e}", exc_info=True)
+        await callback.answer("Произошла ошибка при обработке запроса", show_alert=True)
+
+@router.callback_query(F.data == "send_photo")
+async def prompt_for_photo(callback: CallbackQuery, state: FSMContext):
+    try:
+        # Сохраняем текущие данные из состояния
+        current_data = await state.get_data()
+        
+        # Обновляем состояние, сохраняя все предыдущие данные и разрешая отправку фото
+        await state.set_data({
+            **current_data,
+            'can_send_photo': True,
+            'is_blocked': False
+        })
+        
+        await callback.message.edit_text(
+            "❌ Пожалуйста, отправьте фото:",
+            reply_markup=None
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logging.error(f"Error in prompt_for_photo: {e}", exc_info=True)
+        await callback.answer("Произошла ошибка при обработке запроса", show_alert=True)
+
+@router.message(TaskStates.waiting_for_photo)
+async def handle_photo_submission(
+    message: Message, 
+    state: FSMContext, 
+    session: AsyncSession,
+    bot: Bot
+):
+    try:
+        data = await state.get_data()
+        
+        # Если отправка заблокирована или не было нажатия кнопки
+        if data.get('is_blocked') or not data.get('can_send_photo', False):
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="📎 Отправить фото",
+                    callback_data="send_photo"
+                )
+            ]])
+            await message.answer(
+                "❌ Для отправки фото нажмите кнопку ниже:",
+                reply_markup=keyboard
+            )
+            return
+            
+        if not message.photo:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="📎 Отправить фото",
+                    callback_data="send_photo"
+                )
+            ]])
+            await message.answer(
+                "❌ Пожалуйста, отправьте фото, а не другой тип сообщения.",
+                reply_markup=keyboard
+            )
+            return
+
+        submission_id = data.get('submission_id')
+        
+        if not submission_id:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="📎 Отправить фото",
+                    callback_data="send_photo"
+                )
+            ]])
+            await message.answer(
+                "❌ Произошла ошибка. Попробуйте снова.",
+                reply_markup=keyboard
+            )
+            await state.clear()
+            return
+        
+        # Проверяем статус публикации перед обновлением
+        submission_service = SubmissionService(session)
+        submission = await submission_service.get_submission(submission_id)
+        
+        # Разрешаем отправку фото если:
+        # 1. Публикация на доработке (REVISION)
+        # 2. Текст уже одобрен (TEXT_APPROVED)
+        if not submission or (
+            submission.status != SubmissionStatus.REVISION.value and 
+            submission.status != SubmissionStatus.TEXT_APPROVED.value
+        ):
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="📎 Отправить фото",
+                    callback_data="send_photo"
+                )
+            ]])
+            await message.answer(
+                "❌ Нельзя отправить фото. Дождитесь одобрения текста или отправки на доработку.",
+                reply_markup=keyboard
+            )
+            await state.clear()
+            return
+
+        # Получаем файл_id самой большой версии фото
+        photo = message.photo[-1].file_id
+        
+        # Обновляем публикацию
+        submission = await submission_service.update_submission_content(
+            submission_id=submission_id,
+            photo=photo
+        )
+        
+        # Получаем обновленную публикацию с данными пользователя
+        submission = await submission_service.get_submission_with_user(submission_id)
+        
+        # Подготавливаем превью текста (первые 300 символов)
+        text_preview = submission.content[:300]
+        if len(submission.content) > 300:
+            text_preview += "..."
+        
+        # Уведомляем админов о новом фото
+        from src.config.users import ADMINS
+        for admin in ADMINS:
+            try:
+                await bot.send_photo(
+                    chat_id=admin["telegram_id"],
+                    photo=photo,
+                    caption=(
+                        f"📸 {'Исправленное' if submission.status == SubmissionStatus.REVISION.value else 'Новое'} фото для публикации #{submission.id}\n"
+                        f"От: {submission.user.media_outlet}\n"
+                        f"ID пользователя: {submission.user.telegram_id}\n"
+                        f"Имя пользователя: @{submission.user.username}\n\n"
+                        f"Текст публикации:\n{text_preview}"
+                    ),
+                    reply_markup=await get_moderation_keyboard(submission.id)
+                )
+            except Exception as e:
+                logging.error(f"Не удалось отправить уведомление администратору {admin['username']} (ID: {admin['telegram_id']}): {e}")
+        
+        # Отправляем уведомление пользователю
+        await send_user_notification(bot, submission)
+        
+        await message.answer(
+            "✅ Фото успешно добавлено к публикации. Ожидайте одобрения.",
             reply_markup=get_media_main_keyboard()
         )
         await state.clear()
         
     except Exception as e:
-        logging.error(f"Error in handle_submission_text: {e}", exc_info=True)
+        logging.error(f"Error in handle_photo_submission: {e}", exc_info=True)
         await message.answer(
-            "Произошла ошибка при отправке публикации",
+            "❌ Произошла ошибка при сохранении фото",
             reply_markup=get_media_main_keyboard()
         )
         await state.clear()
@@ -657,10 +733,12 @@ async def show_archive(
 
 async def show_submission_details(message: Message, submission: Submission):
     status_text = {
-        'pending': '🕒 На проверке',
-        'approved': '✅ Одобрено',
-        'revision': '📝 Требует доработки',
-        'completed': '✅ Опубликовано'
+        SubmissionStatus.PENDING.value: '🕒 Текст на проверке',
+        SubmissionStatus.TEXT_APPROVED.value: '✅ Текст одобрен, ожидается фото',
+        SubmissionStatus.PHOTO_PENDING.value: '🕒 Фото на проверке',
+        SubmissionStatus.APPROVED.value: '✅ Публикация одобрена',
+        SubmissionStatus.REVISION.value: '📝 Требует доработки',
+        SubmissionStatus.COMPLETED.value: '✅ Опубликовано'
     }.get(submission.status, submission.status)
     
     text = (
@@ -676,11 +754,35 @@ async def show_submission_details(message: Message, submission: Submission):
         text += f"Ссылка на публикацию: {submission.published_link}\n"
     
     keyboard = None
-    if submission.status == 'revision':
+    if submission.status == SubmissionStatus.REVISION.value:
+        # Определяем, что нужно доработать на основе previous_status
+        is_photo_revision = submission.previous_status == SubmissionStatus.TEXT_APPROVED.value
+        if is_photo_revision:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить исправленное фото",
+                    callback_data=f"submit_revision_{submission.id}"
+                )
+            ]])
+        else:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить исправленный текст",
+                    callback_data=f"send_text_{submission.id}"
+                )
+            ]])
+    elif submission.status == SubmissionStatus.TEXT_APPROVED.value:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(
-                text="Отправить исправленный текст",
-                callback_data=f"submit_revision_{submission.id}"
+                text="Прикрепить фото",
+                callback_data=f"attach_photo_{submission.id}"
+            )
+        ]])
+    elif submission.status == SubmissionStatus.APPROVED.value:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Отправить ссылку",
+                callback_data=f"send_link_{submission.id}"
             )
         ]])
     
@@ -709,3 +811,503 @@ async def handle_archive_button(
     await message.answer("Архивные публикации:")
     for submission in archive_submissions:
         await show_submission_details(message, submission)
+
+@router.callback_query(F.data.startswith("send_link_"))
+async def handle_send_link_button(callback: CallbackQuery, state: FSMContext):
+    submission_id = int(callback.data.split("_")[-1])
+    await state.update_data(submission_id=submission_id)
+    await state.set_state(TaskStates.waiting_for_link)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="Отправить ссылку",
+            callback_data="send_text"
+        )
+    ]])
+    await callback.message.answer(
+        "❌ Для отправки ссылки нажмите кнопку ниже:",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+@router.message(TaskStates.waiting_for_link)
+async def handle_link_submission(
+    message: Message, 
+    state: FSMContext, 
+    session: AsyncSession,
+    bot: Bot
+):
+    try:
+        # Проверяем, был ли переход по кнопке
+        data = await state.get_data()
+        if not data.get('can_send_text', False):  # Явно указываем False как значение по умолчанию
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить ссылку",
+                    callback_data="send_text"
+                )
+            ]])
+            await message.answer(
+                "❌ Для отправки ссылки нажмите кнопку ниже:",
+                reply_markup=keyboard
+            )
+            # Очищаем состояние, сохраняя только необходимые данные
+            await state.set_data({
+                'submission_id': data.get('submission_id'),
+                'can_send_text': False
+            })
+            return  # Важно: ранний возврат, чтобы предотвратить дальнейшее выполнение
+
+        # Проверяем длину ссылки только если разрешена отправка
+        if len(message.text) > 3500:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить ссылку",
+                    callback_data="send_text"
+                )
+            ]])
+            await message.answer(
+                "❌ Ссылка слишком длинная. Максимальная длина - 3500 символов.",
+                reply_markup=keyboard
+            )
+            # Сбрасываем флаг can_send_text
+            await state.set_data({
+                'submission_id': data.get('submission_id'),
+                'can_send_text': False
+            })
+            return  # Важно: ранний возврат после ошибки
+            
+        data = await state.get_data()
+        submission_id = data.get('submission_id')
+        
+        if not submission_id:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить ссылку",
+                    callback_data="send_text"
+                )
+            ]])
+            await message.answer(
+                "❌ Произошла ошибка. Попробуйте снова.",
+                reply_markup=keyboard
+            )
+            await state.clear()
+            return
+        
+        submission_service = SubmissionService(session)
+        submission = await submission_service.get_submission(submission_id)
+        
+        if not submission:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить ссылку",
+                    callback_data="send_text"
+                )
+            ]])
+            await message.answer(
+                "❌ Публикация не найдена.",
+                reply_markup=keyboard
+            )
+            await state.clear()
+            return
+
+        # Проверяем, нет ли уже ссылки у этой публикации
+        if submission.published_link:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить ссылку",
+                    callback_data="send_text"
+                )
+            ]])
+            await message.answer(
+                "❌ Вы уже отправляли ссылку для этой публикации. Повторная отправка невозможна.",
+                reply_markup=keyboard
+            )
+            await state.clear()
+            return
+
+        if submission.status != SubmissionStatus.APPROVED.value:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить ссылку",
+                    callback_data="send_text"
+                )
+            ]])
+            await message.answer(
+                "❌ Нельзя отправить ссылку, пока публикация не одобрена полностью.",
+                reply_markup=keyboard
+            )
+            await state.clear()
+            return
+        
+        # Сохраняем ссылку
+        submission = await submission_service.add_published_link(
+            submission_id=submission_id,
+            published_link=message.text
+        )
+        
+        # Уведомляем админов
+        from src.config.users import ADMINS
+        for admin in ADMINS:
+            try:
+                await bot.send_message(
+                    admin["telegram_id"],
+                    f"✅ Ссылка успешно добавлена. Спасибо!"
+                )
+            except Exception as e:
+                logging.error(f"Не удалось отправить уведомление администратору {admin['username']}: {e}")
+        
+        await message.answer(
+            "✅ Ссылка успешно добавлена. Спасибо!",
+            reply_markup=get_media_main_keyboard()
+        )
+        # Очищаем состояние, сохраняя только необходимые данные
+        await state.set_data({
+            'submission_id': submission.id,
+            'can_send_text': False
+        })
+        
+    except Exception as e:
+        logging.error(f"Error in handle_link_submission: {e}", exc_info=True)
+        await message.answer(
+            "❌ Произошла ошибка при добавлении ссылки",
+            reply_markup=get_media_main_keyboard()
+        )
+        # Очищаем состояние при ошибке
+        await state.set_data({
+            'submission_id': data.get('submission_id'),
+            'can_send_text': False
+        })
+
+async def send_user_notification(bot: Bot, submission: Submission):
+    """Отправляет уведомление пользователю о статусе публикации"""
+    try:
+        if not submission.user or not submission.user.telegram_id:
+            logging.error(f"No user or telegram_id found for submission {submission.id}")
+            return
+            
+        if submission.status == SubmissionStatus.TEXT_APPROVED.value:
+            # Если текст одобрен, отправляем сообщение с кнопкой для фото
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="📎 Прикрепить фото",
+                    callback_data=f"attach_photo_{submission.id}"
+                )
+            ]])
+            await bot.send_message(
+                chat_id=submission.user.telegram_id,
+                text="✅ Ваш текст одобрен!\nТеперь необходимо прикрепить фото к публикации.",
+                reply_markup=keyboard
+            )
+        elif submission.status == SubmissionStatus.APPROVED.value:
+            # Если публикация полностью одобрена
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="🔗 Отправить ссылку",
+                    callback_data=f"send_link_{submission.id}"
+                )
+            ]])
+            await bot.send_message(
+                chat_id=submission.user.telegram_id,
+                text="✅ Ваша публикация полностью одобрена!\nТеперь отправьте ссылку на опубликованный материал.",
+                reply_markup=keyboard
+            )
+        elif submission.status == SubmissionStatus.COMPLETED.value:
+            # Если публикация завершена
+            await bot.send_message(
+                chat_id=submission.user.telegram_id,
+                text="✅ Ваша публикация успешно завершена! Спасибо за сотрудничество.",
+                reply_markup=get_media_main_keyboard()
+            )
+    except Exception as e:
+        logging.error(f"Error in send_user_notification: {e}", exc_info=True)
+
+@router.message(F.text == "Активные задания")
+async def handle_active_tasks_button(
+    message: Message, 
+    session: AsyncSession,
+    user: User,
+    bot: Bot
+):
+    try:
+        task_service = TaskService(session)
+        tasks = await task_service.get_active_tasks(user.media_outlet)
+        
+        if not tasks:
+            await message.answer("У вас нет активных заданий")
+            return
+            
+        logging.info(f"Received {len(tasks)} tasks")
+        
+        # Отправляем каждое задание отдельным сообщением
+        for task in tasks:
+            try:
+                logging.info(f"Processing task {task.id}, photo={task.photo}")
+                
+                # Проверяем, взято ли задание в работу
+                assignment = await task_service.get_task_assignment(task.id, user.media_outlet)
+                status_text = "✅ В работе" if assignment else "🆕 Доступно"
+                
+                # Обрезаем ссылку если она слишком длинная
+                press_release_link = task.press_release_link
+                if len(press_release_link) > 300:
+                    press_release_link = press_release_link[:297] + "..."
+                
+                # Формируем текст для задания
+                task_text = (
+                    f"Задание #{task.id}\n"
+                    f"Статус: {status_text}\n"
+                    f"Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}\n"
+                    f"Пресс-релиз: {press_release_link}"
+                )
+                
+                # Формируем клавиатуру в зависимости от статуса
+                keyboard = None
+                if assignment:
+                    # Если задание в работе, показываем кнопку "Отправить текст"
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="📝 Отправить текст",
+                            callback_data=f"submit_task_{task.id}"
+                        )
+                    ]])
+                else:
+                    # Если задание не взято, показываем кнопку "Взять в работу"
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="✅ Взять в работу",
+                            callback_data=f"take_task_{task.id}"
+                        )
+                    ]])
+                
+                # Если есть фото, отправляем с фото
+                if task.photo:
+                    await message.answer_photo(
+                        photo=task.photo,
+                        caption=task_text,
+                        reply_markup=keyboard
+                    )
+                else:
+                    # Иначе отправляем просто текст
+                    await message.answer(
+                        task_text,
+                        reply_markup=keyboard
+                    )
+            except Exception as e:
+                logging.error(f"Error processing task {task.id}: {e}", exc_info=True)
+                continue  # Продолжаем с следующим заданием даже если текущее вызвало ошибку
+                
+    except Exception as e:
+        logging.error(f"Error in show_active_tasks: {e}", exc_info=True)
+        await message.answer(
+            "❌ Произошла ошибка при получении списка заданий",
+            reply_markup=get_media_main_keyboard()
+        )
+
+@router.message(F.text == "Мои публикации")
+async def handle_my_submissions_button(
+    message: Message, 
+    session: AsyncSession,
+    user: User
+):
+    submission_service = SubmissionService(session)
+    
+    # Получаем активные публикации
+    active_submissions = await submission_service.get_user_submissions(user.id, active_only=True)
+    
+    # Получаем архивные публикации
+    archive_submissions = await submission_service.get_user_submissions(user.id, active_only=False)
+    
+    if not active_submissions and not archive_submissions:
+        await message.answer("У вас пока нет публикаций")
+        return
+    
+    # Отображаем активные публикации
+    if active_submissions:
+        await message.answer("Активные публикации:")
+        for submission in active_submissions:
+            await show_submission_details(message, submission)
+    
+    # Добавляем кнопку для просмотра архива
+    if archive_submissions:
+        await message.answer(
+            "Есть архивные публикации",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Показать архив",
+                    callback_data="show_archive"
+                )
+            ]])
+        )
+
+@router.callback_query(F.data.startswith("send_text_"))
+async def prompt_for_text(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    try:
+        # Получаем submission_id из callback_data
+        submission_id = int(callback.data.split("_")[-1])
+        
+        # Получаем публикацию для получения task_id
+        submission_service = SubmissionService(session)
+        submission = await submission_service.get_submission(submission_id)
+        
+        if not submission:
+            await callback.answer("Публикация не найдена", show_alert=True)
+            return
+        
+        # Устанавливаем состояние ожидания текста
+        await state.set_state(TaskStates.waiting_for_text)
+        
+        # Разрешаем отправку текста и убираем блокировку
+        await state.set_data({
+            'submission_id': submission_id,
+            'task_id': submission.task_id,  # Сохраняем task_id из публикации
+            'can_send_text': True,
+            'is_blocked': False
+        })
+        
+        await callback.message.answer("❌ Пожалуйста, отправьте исправленный текст публикации:")
+        await callback.answer()
+        
+    except Exception as e:
+        logging.error(f"Error in prompt_for_text: {e}", exc_info=True)
+        await callback.answer("Произошла ошибка при обработке запроса", show_alert=True)
+
+@router.message(TaskStates.waiting_for_revision)
+async def handle_revision_comment(
+    message: Message, 
+    state: FSMContext, 
+    session: AsyncSession,
+    bot: Bot
+):
+    try:
+        # Проверяем, был ли переход по кнопке
+        data = await state.get_data()
+        if not data.get('can_send_text', False):  # Явно указываем False как значение по умолчанию
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить комментарий",
+                    callback_data="send_text"
+                )
+            ]])
+            await message.answer(
+                "❌ Для отправки комментария нажмите кнопку ниже:",
+                reply_markup=keyboard
+            )
+            # Очищаем состояние, сохраняя только необходимые данные
+            await state.set_data({
+                'submission_id': data.get('submission_id'),
+                'is_photo_revision': data.get('is_photo_revision'),
+                'can_send_text': False
+            })
+            return  # Важно: ранний возврат, чтобы предотвратить дальнейшее выполнение
+
+        # Проверяем длину комментария только если разрешена отправка
+        if len(message.text) > 3500:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить комментарий",
+                    callback_data="send_text"
+                )
+            ]])
+            await message.answer(
+                "❌ Комментарий слишком длинный. Максимальная длина - 3500 символов.",
+                reply_markup=keyboard
+            )
+            # Сбрасываем флаг can_send_text
+            await state.set_data({
+                'submission_id': data.get('submission_id'),
+                'is_photo_revision': data.get('is_photo_revision'),
+                'can_send_text': False
+            })
+            return  # Важно: ранний возврат после ошибки
+            
+        data = await state.get_data()
+        submission_id = data.get('submission_id')
+        is_photo_revision = data.get('is_photo_revision', False)
+        
+        if not submission_id:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить комментарий",
+                    callback_data="send_text"
+                )
+            ]])
+            await message.answer(
+                "❌ Произошла ошибка. Попробуйте снова.",
+                reply_markup=keyboard
+            )
+            await state.clear()
+            return
+
+        submission_service = SubmissionService(session)
+        submission = await submission_service.get_submission(submission_id)
+        
+        if not submission:
+            await message.answer(
+                "❌ Публикация не найдена.",
+                reply_markup=get_media_main_keyboard()
+            )
+            await state.clear()
+            return
+
+        # Сохраняем комментарий
+        submission = await submission_service.add_revision_comment(
+            submission_id=submission_id,
+            comment=message.text
+        )
+        
+        # Уведомляем админов
+        from src.config.users import ADMINS
+        for admin in ADMINS:
+            try:
+                await bot.send_message(
+                    admin["telegram_id"],
+                    f"📨 Добавлен комментарий к публикации #{submission.id}\n"
+                    f"От: {submission.user.media_outlet}\n"
+                    f"ID пользователя: {submission.user.telegram_id}\n"
+                    f"Имя пользователя: @{submission.user.username}\n\n"
+                    f"Комментарий:\n{message.text}"
+                )
+            except Exception as e:
+                logging.error(f"Не удалось отправить уведомление администратору {admin['username']}: {e}")
+        
+        await message.answer(
+            "✅ Комментарий успешно добавлен. Спасибо!",
+            reply_markup=get_media_main_keyboard()
+        )
+        # Очищаем состояние, сохраняя только необходимые данные
+        await state.set_data({
+            'submission_id': submission.id,
+            'is_photo_revision': data.get('is_photo_revision'),
+            'can_send_text': False
+        })
+        
+    except Exception as e:
+        logging.error(f"Error in handle_revision_comment: {e}", exc_info=True)
+        await message.answer(
+            "❌ Произошла ошибка при добавлении комментария",
+            reply_markup=get_media_main_keyboard()
+        )
+        # Очищаем состояние при ошибке
+        await state.set_data({
+            'submission_id': data.get('submission_id'),
+            'is_photo_revision': data.get('is_photo_revision'),
+            'can_send_text': False
+        })
+
+@router.callback_query(F.data == "send_text")
+async def prompt_for_new_text(callback: CallbackQuery, state: FSMContext):
+    # Сохраняем текущие данные из состояния
+    data = await state.get_data()
+    
+    # Устанавливаем состояние ожидания текста
+    await state.set_state(TaskStates.waiting_for_text)
+    
+    # Разрешаем отправку текста и убираем блокировку
+    await state.set_data({
+        'task_id': data.get('task_id'),
+        'can_send_text': True,
+        'is_blocked': False
+    })
+    
+    await callback.message.answer("❌ Пожалуйста, отправьте текст публикации:")
+    await callback.answer()

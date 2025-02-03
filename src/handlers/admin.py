@@ -14,8 +14,11 @@ from src.keyboards.admin_kb import get_admin_main_keyboard, get_moderation_keybo
 from src.keyboards.moderation_kb import get_moderation_keyboard
 from src.utils.logger import logger
 from src.database.models import User, Task
+from src.database.models.submission import SubmissionStatus
+from src.utils.check_admin import check_admin
 import logging
 from typing import List
+from src.handlers.media import send_user_notification
 
 # Создаем роутер
 router = Router(name='admin')
@@ -29,7 +32,11 @@ async def check_admin(user: User) -> bool:
     return is_admin
 
 @router.callback_query(F.data == "export_reports")
-async def export_reports(callback: CallbackQuery, session: AsyncSession):
+async def export_reports(callback: CallbackQuery, session: AsyncSession, user: User):
+    if not await check_admin(user):
+        await callback.answer("У вас нет прав администратора", show_alert=True)
+        return
+
     try:
         logging.info(f"Admin {callback.from_user.id} called export_reports")
         logging.info(f"Callback data: {callback.data}")
@@ -56,30 +63,28 @@ async def create_task(callback: CallbackQuery, state: FSMContext, user: User):
         return
 
     logging.info(f"Admin {user.telegram_id} called create_task")
-    await state.set_state(TaskStates.waiting_for_press_release)
+    await state.set_state(AdminStates.waiting_for_press_release)
     await callback.message.answer("Отправьте ссылку на пресс-релиз:")
     await callback.answer()
 
-@router.message(TaskStates.waiting_for_press_release)
+@router.message(AdminStates.waiting_for_press_release)
 async def handle_press_release(message: Message, state: FSMContext):
     await state.update_data(press_release_link=message.text)
-    await state.set_state(TaskStates.waiting_for_photo)
+    await state.set_state(AdminStates.waiting_for_task_photo)
     await message.answer("Отправьте фото (необязательно):")
 
-@router.message(TaskStates.waiting_for_photo)
+@router.message(AdminStates.waiting_for_task_photo)
 async def handle_photo(message: Message, state: FSMContext):
     photo = None
     if message.photo:
         photo = message.photo[-1].file_id
         logging.info(f"Photo received: {photo}")
-    else:
-        logging.info("No photo received")
     
     await state.update_data(photo=photo)
-    await state.set_state(TaskStates.waiting_for_deadline)
-    await message.answer("Укажите дедлайн в формате ДД.ММ.ГГГГ ЧЧ:ММ:")
+    await state.set_state(AdminStates.waiting_for_deadline)
+    await message.answer("Укажите дедлайн в формате ДД.ММ.ГГГГ ЧЧ:ММ")
 
-@router.message(TaskStates.waiting_for_deadline)
+@router.message(AdminStates.waiting_for_deadline)
 async def handle_deadline(
     message: Message, 
     state: FSMContext, 
@@ -117,7 +122,7 @@ async def handle_deadline(
                         chat_id=media_user.telegram_id,
                         photo=task.photo,
                         caption=(
-                            f"📣 Новое задание #{task.id}\n"
+                            f"[ANNOUNCE] Новое задание #{task.id}\n"
                             f"Пресс-релиз: {task.press_release_link}\n"
                             f"Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}"
                         ),
@@ -132,7 +137,7 @@ async def handle_deadline(
                     await bot.send_message(
                         chat_id=media_user.telegram_id,
                         text=(
-                            f"📣 Новое задание #{task.id}\n"
+                            f"[ANNOUNCE] Новое задание #{task.id}\n"
                             f"Пресс-релиз: {task.press_release_link}\n"
                             f"Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}"
                         ),
@@ -162,7 +167,11 @@ async def handle_deadline(
         await state.clear()
 
 @router.callback_query(F.data == "review_posts")
-async def review_posts(callback: CallbackQuery, session: AsyncSession):
+async def review_posts(callback: CallbackQuery, session: AsyncSession, user: User):
+    if not await check_admin(user):
+        await callback.answer("У вас нет прав администратора", show_alert=True)
+        return
+
     submission_service = SubmissionService(session)
     submissions = await submission_service.get_pending_submissions()
     
@@ -173,7 +182,7 @@ async def review_posts(callback: CallbackQuery, session: AsyncSession):
     for submission in submissions:
         # Формируем текст с полной информацией
         text = (
-            f"📨 Публикация #{submission.id}\n"
+            f"[NEW] Публикация #{submission.id}\n"
             f"От: {submission.user.media_outlet}\n"
             f"ID пользователя: {submission.user.telegram_id}\n"
             f"Имя пользователя: @{submission.user.username}\n"
@@ -198,25 +207,28 @@ async def review_posts(callback: CallbackQuery, session: AsyncSession):
     await callback.answer()
 
 @router.callback_query(F.data.startswith("approve_submission_"))
-async def approve_submission(callback: CallbackQuery, session: AsyncSession):
+async def approve_submission(callback: CallbackQuery, session: AsyncSession, user: User, bot: Bot):
+    if not await check_admin(user):
+        await callback.answer("У вас нет прав администратора", show_alert=True)
+        return
+
     submission_id = int(callback.data.split("_")[-1])
     submission_service = SubmissionService(session)
 
     try:
-        # Получаем публикацию
-        submission = await submission_service.get_submission(submission_id)
+        # Получаем публикацию с данными пользователя
+        submission = await submission_service.get_submission_with_user(submission_id)
         if not submission:
             await callback.answer("Публикация не найдена", show_alert=True)
             return
 
-        # Проверяем, не одобрено ли задание уже
-        if submission.status == 'approved':
-            await callback.answer("Это задание уже одобрено.", show_alert=True)
+        # Пытаемся одобрить публикацию
+        try:
+            submission = await submission_service.approve_submission(submission_id)
+            logging.info(f"Submission {submission_id} approved successfully")
+        except ValueError as e:
+            await callback.answer(str(e), show_alert=True)
             return
-
-        # Одобряем публикацию
-        submission = await submission_service.approve_submission(submission_id)
-        logging.info(f"Submission {submission_id} approved successfully")
 
         # Формируем текст сообщения
         if callback.message.text:
@@ -232,26 +244,14 @@ async def approve_submission(callback: CallbackQuery, session: AsyncSession):
                 reply_markup=callback.message.reply_markup
             )
         else:
-            message_text = f"Публикация #{submission.id} одобрена ✅"
+            message_text = f"[NEW] Публикация #{submission.id} одобрена ✅"
             await callback.message.edit_text(
                 message_text,
                 reply_markup=callback.message.reply_markup
             )
 
-        # Асинхронно загружаем пользователя
-        user = await session.get(User, submission.user_id)
-        if user:
-            # Отправляем уведомление пользователю с кнопкой
-            await callback.bot.send_message(
-                chat_id=user.telegram_id,
-                text=f"🎉 Ваша публикация #{submission.id} была одобрена!\n\nТеперь вы можете отправить ссылку на пресс-релиз.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Отправить ссылку",
-                        callback_data=f"send_link_{submission.id}"
-                    )
-                ]])
-            )
+        # Отправляем уведомление пользователю
+        await send_user_notification(bot, submission)
 
         # Отправляем сообщение об успешном одобрении как обычное сообщение
         await callback.message.answer("✅ Задание успешно одобрено")
@@ -259,33 +259,61 @@ async def approve_submission(callback: CallbackQuery, session: AsyncSession):
 
     except Exception as e:
         logging.error(f"Error approving submission: {e}")
-        await callback.answer("Произошла ошибка при одобрении публикации")
+        await callback.answer("Произошла ошибка при одобрении публикации", show_alert=True)
 
-@router.callback_query(F.data.startswith("revise_"))
-async def revise_submission(
-    callback: CallbackQuery, 
-    state: FSMContext,
-    session: AsyncSession
-):
-    submission_id = int(callback.data.split("_")[-1])
-    
-    # Получаем данные о публикации
-    submission_service = SubmissionService(session)
-    submission = await submission_service.get_submission(submission_id)
-    
-    # Проверяем статус публикации
-    if submission.status == "approved":
-        await callback.answer("Одобренные публикации нельзя отправить на доработку", show_alert=True)
+@router.callback_query(F.data.startswith("request_revision_"))
+async def request_revision(callback: CallbackQuery, state: FSMContext, session: AsyncSession, user: User):
+    if not await check_admin(user):
+        await callback.answer("У вас нет прав администратора", show_alert=True)
         return
-    
-    # Сохраняем ID публикации в состоянии
-    await state.update_data(submission_id=submission_id)
-    
-    # Переводим пользователя в состояние ожидания комментария
-    await state.set_state(TaskStates.waiting_for_revision)
-    
-    await callback.message.answer("Пожалуйста, отправьте комментарий для доработки:")
-    await callback.answer()
+
+    try:
+        submission_id = int(callback.data.split("_")[-1])
+        
+        # Получаем публикацию для проверки статуса
+        submission_service = SubmissionService(session)
+        submission = await submission_service.get_submission_with_user(submission_id)
+        
+        if not submission:
+            await callback.answer("Публикация не найдена", show_alert=True)
+            return
+            
+        # Проверяем возможность отправки на доработку
+        if submission.status == SubmissionStatus.REVISION.value:
+            await callback.message.answer("❌ Публикация уже находится на доработке")
+            await callback.answer()
+            return
+        elif submission.status == SubmissionStatus.COMPLETED.value:
+            await callback.message.answer("❌ Нельзя отправить на доработку завершенную публикацию")
+            await callback.answer()
+            return
+        elif submission.status == SubmissionStatus.APPROVED.value:
+            await callback.message.answer("❌ Нельзя отправить на доработку одобренную публикацию")
+            await callback.answer()
+            return
+            
+        # Определяем тип контента для доработки
+        is_photo_revision = False
+        if submission.status == SubmissionStatus.PHOTO_PENDING.value:
+            is_photo_revision = True
+        elif submission.photo and submission.status == SubmissionStatus.REVISION.value:
+            is_photo_revision = True
+            
+        await state.update_data(
+            submission_id=submission_id,
+            is_photo_revision=is_photo_revision,
+            can_send_text=True
+        )
+        await state.set_state(TaskStates.waiting_for_revision)
+        
+        content_type = "фото" if is_photo_revision else "текста"
+        await callback.message.answer(f"Введите комментарий для доработки {content_type}:")
+        await callback.answer()
+        
+    except Exception as e:
+        logging.error(f"Error in request_revision: {e}", exc_info=True)
+        await callback.message.answer("[ERROR] Произошла ошибка при запросе доработки")
+        await callback.answer()
 
 @router.message(TaskStates.waiting_for_revision)
 async def handle_revision_comment(
@@ -294,33 +322,122 @@ async def handle_revision_comment(
     session: AsyncSession,
     bot: Bot
 ):
-    data = await state.get_data()
-    submission_id = data['submission_id']
-    
-    submission_service = SubmissionService(session)
-    submission = await submission_service.request_revision(submission_id, message.text)
-    
-    # Получаем пользователя асинхронно
-    user = await session.get(User, submission.user_id)
-    
-    if user:
-        try:
-            await bot.send_message(
-                user.telegram_id,
-                f"📝 Ваша публикация #{submission.id} требует доработки\n"
-                f"Комментарий: {message.text}\n\n",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Отправить исправленный текст",
-                        callback_data=f"submit_revision_{submission.id}"
-                    )
-                ]])
+    try:
+        data = await state.get_data()
+        submission_id = data.get('submission_id')
+        is_photo_revision = data.get('is_photo_revision', False)
+        
+        if not submission_id:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить комментарий",
+                    callback_data="send_text"
+                )
+            ]])
+            await message.answer(
+                "[ERROR] Произошла ошибка. Попробуйте снова.\n\n"
+                "Нажмите кнопку ниже, чтобы отправить комментарий:",
+                reply_markup=keyboard
             )
-        except Exception as e:
-            print(f"Не удалось отправить уведомление пользователю {user.username} (ID: {user.telegram_id}): {e}")
-    
-    await message.answer("Публикация отправлена на доработку")
-    await state.clear()
+            await state.set_data({
+                'can_send_text': False
+            })
+            return
+
+        submission_service = SubmissionService(session)
+        
+        try:
+            # Запрашиваем доработку
+            submission = await submission_service.request_revision(
+                submission_id=submission_id,
+                comment=message.text,
+                is_photo_revision=is_photo_revision
+            )
+            
+            # Получаем обновленную публикацию с данными пользователя
+            submission = await submission_service.get_submission_with_user(submission_id)
+            
+            if not submission.user:
+                logging.error(f"No user found for submission {submission_id}")
+                await message.answer("Произошла ошибка: пользователь не найден")
+                await state.set_data({
+                    'submission_id': submission_id,
+                    'is_photo_revision': is_photo_revision,
+                    'can_send_text': False
+                })
+                return
+                
+            if not submission.user.telegram_id:
+                logging.error(f"No telegram_id found for user of submission {submission_id}")
+                await message.answer("Произошла ошибка: не найден Telegram ID пользователя")
+                await state.set_data({
+                    'submission_id': submission_id,
+                    'is_photo_revision': is_photo_revision,
+                    'can_send_text': False
+                })
+                return
+            
+            # Отправляем уведомление пользователю
+            content_type = "фото" if is_photo_revision else "текста"
+            try:
+                await bot.send_message(
+                    chat_id=submission.user.telegram_id,
+                    text=f"⚠️ {content_type.capitalize()} для публикации #{submission.id} требует доработки.\n"
+                         f"Комментарий: {message.text}",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="Отправить исправленный текст",
+                            callback_data="send_text"
+                        )
+                    ]])
+                )
+            except Exception as e:
+                logging.error(f"Error sending revision notification to user: {e}")
+            
+            await message.answer("✅ Комментарий отправлен пользователю")
+            await state.set_data({
+                'submission_id': submission_id,
+                'is_photo_revision': is_photo_revision,
+                'can_send_text': False
+            })
+            
+        except ValueError as e:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить комментарий",
+                    callback_data="send_text"
+                )
+            ]])
+            await message.answer(
+                "[ERROR] {str(e)}\n\n"
+                "Нажмите кнопку ниже, чтобы отправить другой комментарий:",
+                reply_markup=keyboard
+            )
+            await state.set_data({
+                'submission_id': submission_id,
+                'is_photo_revision': is_photo_revision,
+                'can_send_text': False
+            })
+            return
+        
+    except Exception as e:
+        logging.error(f"Error in handle_revision_comment: {e}", exc_info=True)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Отправить комментарий",
+                callback_data="send_text"
+            )
+        ]])
+        await message.answer(
+            "[ERROR] Произошла ошибка при отправке комментария.\n\n"
+            "Нажмите кнопку ниже, чтобы попробовать снова:",
+            reply_markup=keyboard
+        )
+        await state.set_data({
+            'submission_id': data.get('submission_id'),
+            'is_photo_revision': data.get('is_photo_revision'),
+            'can_send_text': False
+        })
 
 @router.message(Command("create"))
 async def cmd_create(message: Message, state: FSMContext, user: User):
@@ -328,7 +445,7 @@ async def cmd_create(message: Message, state: FSMContext, user: User):
         await message.answer("У вас нет прав администратора")
         return
 
-    await state.set_state(TaskStates.waiting_for_press_release)
+    await state.set_state(AdminStates.waiting_for_press_release)
     await message.answer("Отправьте ссылку на пресс-релиз:")
 
 @router.message(Command("review"))
@@ -389,8 +506,12 @@ async def cmd_export(message: Message, session: AsyncSession, user: User):
         await message.answer("Произошла ошибка при создании отчета")
 
 @router.message(Command("admin"))
-async def handle_admin_command(message: Message):
+async def handle_admin_command(message: Message, user: User):
     try:
+        if not await check_admin(user):
+            await message.answer("❌ У вас нет прав администратора")
+            return
+            
         await message.answer(
             "Админ панель",
             reply_markup=get_admin_main_keyboard()
@@ -410,7 +531,7 @@ async def review_submission(callback: CallbackQuery, session: AsyncSession):
         return
 
     text = (
-        f"Публикация #{submission.id}\n"
+        f"[NEW] Публикация #{submission.id}\n"
         f"От: {submission.user.media_outlet}\n"
         f"Задание: #{submission.task_id}\n"
         f"Текст:\n{submission.content}"
@@ -464,7 +585,7 @@ async def handle_link_submission(
             try:
                 await bot.send_message(
                     admin["telegram_id"],
-                    f"🔗 Пользователь @{message.from_user.username} отправил ссылку на публикацию #{submission.id}:\n{message.text}"
+                    f"[ANNOUNCE] Пользователь @{message.from_user.username} отправил ссылку на публикацию #{submission.id}:\n{message.text}"
                 )
             except Exception as e:
                 print(f"Не удалось отправить уведомление администратору {admin['username']} (ID: {admin['telegram_id']}): {e}")
@@ -494,7 +615,7 @@ async def delete_task(
         # Удаляем задание и все связанные данные
         await task_service.delete_task_with_related_data(task_id)
         
-        await callback.answer("Задание и все связанные данные успешно удалены ✅")
+        await callback.answer("[ERROR] Задание и все связанные данные успешно удалены [OK]")
         
         # Удаляем сообщение с заданием
         await callback.message.delete()
@@ -520,19 +641,55 @@ async def list_tasks_for_deletion(
         await callback.message.answer("Нет заданий для удаления")
         return
     
+    # Отправляем каждое задание отдельным сообщением
     for task in tasks:
-        await callback.message.answer(
+        # Обрезаем ссылку если она слишком длинная
+        press_release_link = task.press_release_link
+        if len(press_release_link) > 300:
+            press_release_link = press_release_link[:297] + "..."
+            
+        task_text = (
             f"Задание #{task.id}\n"
-            f"Пресс-релиз: {task.press_release_link}\n"
             f"Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}\n"
-            f"Статус: {task.status}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="❌ Удалить",
-                    callback_data=f"delete_task_{task.id}"
-                )
-            ]])
+            f"Статус: {task.status}\n"
+            f"Пресс-релиз: {press_release_link}"
         )
+        
+        # Если есть фото, отправляем с фото
+        if task.photo:
+            try:
+                await callback.message.answer_photo(
+                    photo=task.photo,
+                    caption=task_text,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="❌ Удалить",
+                            callback_data=f"delete_task_{task.id}"
+                        )
+                    ]])
+                )
+            except Exception as e:
+                logging.error(f"Error sending task {task.id} with photo: {e}")
+                # Если не удалось отправить с фото, отправляем без него
+                await callback.message.answer(
+                    task_text,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="❌ Удалить",
+                            callback_data=f"delete_task_{task.id}"
+                        )
+                    ]])
+                )
+        else:
+            await callback.message.answer(
+                task_text,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="❌ Удалить",
+                        callback_data=f"delete_task_{task.id}"
+                    )
+                ]])
+            )
     
     await callback.answer()
 
@@ -545,7 +702,7 @@ async def get_moderation_keyboard(submission_id: int, session: AsyncSession) -> 
             InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve_submission_{submission_id}"),
             InlineKeyboardButton(
                 text="📝 На доработку", 
-                callback_data=f"revise_{submission_id}",
+                callback_data=f"request_revision_{submission_id}",
                 disabled=submission.status == "approved"
             )
         ]
@@ -575,7 +732,7 @@ async def notify_media_about_new_task(
                     chat_id=user.telegram_id,
                     photo=task.photo,
                     caption=(
-                        f"📣 Новое задание #{task.id}\n"
+                        f"[ANNOUNCE] Новое задание #{task.id}\n"
                         f"Пресс-релиз: {task.press_release_link}\n"
                         f"Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}"
                     ),
@@ -590,7 +747,7 @@ async def notify_media_about_new_task(
                 await bot.send_message(
                     chat_id=user.telegram_id,
                     text=(
-                        f"📣 Новое задание #{task.id}\n"
+                        f"[ANNOUNCE] Новое задание #{task.id}\n"
                         f"Пресс-релиз: {task.press_release_link}\n"
                         f"Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}"
                     ),
@@ -650,3 +807,38 @@ async def handle_task_photo(
             reply_markup=get_admin_main_keyboard()
         )
         await state.clear()
+
+@router.callback_query(F.data.startswith("request_link_"))
+async def request_link(callback: CallbackQuery, session: AsyncSession, bot: Bot):
+    try:
+        submission_id = int(callback.data.split("_")[-1])
+        
+        # Получаем публикацию с данными пользователя
+        submission_service = SubmissionService(session)
+        submission = await submission_service.get_submission_with_user(submission_id)
+        
+        if not submission:
+            await callback.answer("Публикация не найдена", show_alert=True)
+            return
+            
+        if not submission.user:
+            await callback.answer("Пользователь не найден", show_alert=True)
+            return
+            
+        # Отправляем уведомление пользователю
+        await bot.send_message(
+            chat_id=submission.user.telegram_id,
+            text=f"🔗 Пожалуйста, отправьте ссылку на опубликованный материал для публикации #{submission.id}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Отправить ссылку",
+                    callback_data=f"send_link_{submission.id}"
+                )
+            ]])
+        )
+        
+        await callback.answer("Запрос на предоставление ссылки отправлен пользователю")
+        
+    except Exception as e:
+        logging.error(f"Error in request_link: {e}", exc_info=True)
+        await callback.answer("Произошла ошибка при запросе ссылки")

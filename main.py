@@ -9,18 +9,18 @@ from pathlib import Path
 from aiogram.client.default import DefaultBotProperties
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from src.config.bot_config import BOT_TOKEN, DATABASE_URL
+from src.utils.logging_config import setup_logging
 
 from src.handlers import admin, media, common, set_commands
 from src.middlewares.auth import AuthMiddleware
 from src.middlewares.db_middleware import DbSessionMiddleware
 from src.middlewares.user_middleware import UserMiddleware
-from src.utils.logger import setup_logger
 from src.database.engine import engine
 from src.database.base import Base
 from aiogram import Router
 
-logger = setup_logger()
-load_dotenv()
+# Настраиваем логирование
+setup_logging()
 
 async def main():
     # Настраиваем логирование

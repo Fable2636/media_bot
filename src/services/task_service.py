@@ -1,9 +1,10 @@
 from datetime import datetime, timedelta
 from typing import List, Optional
-from sqlalchemy import select, delete, and_
+from sqlalchemy import select, delete, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, joinedload
 from src.database.models import Task, TaskAssignment, Submission, User
+from src.database.models.task import TaskStatus
 from sqlalchemy.types import Date
 import logging
 
@@ -30,11 +31,32 @@ class TaskService:
         await self.session.refresh(task)
         return task
 
+    async def check_media_outlet_submission(self, task_id: int, media_outlet: str) -> bool:
+        """Проверяет, есть ли уже одобренная или завершенная публикация от этого СМИ"""
+        query = (
+            select(Submission)
+            .join(User, User.id == Submission.user_id)
+            .where(
+                and_(
+                    Submission.task_id == task_id,
+                    User.media_outlet == media_outlet,
+                    Submission.status.in_(['approved', 'completed'])
+                )
+            )
+        )
+        result = await self.session.execute(query)
+        return result.scalar_one_or_none() is not None
+
     async def assign_task(self, task_id: int, media_outlet: str) -> Optional[TaskAssignment]:
         # Проверяем, не назначено ли задание уже другому представителю того же СМИ
         existing_assignment = await self.get_task_assignment(task_id, media_outlet)
         if existing_assignment:
             return None  # Задание уже назначено представителю этого СМИ
+            
+        # Проверяем, нет ли уже одобренной публикации от этого СМИ
+        has_completed_submission = await self.check_media_outlet_submission(task_id, media_outlet)
+        if has_completed_submission:
+            return None  # Задание уже выполнено этим СМИ
         
         assignment = TaskAssignment(
             task_id=task_id,
@@ -52,15 +74,49 @@ class TaskService:
         await self.session.refresh(assignment)
         return assignment
 
-    async def get_active_tasks(self) -> List[Task]:
+    async def get_active_tasks(self, media_outlet: str = None) -> List[Task]:
+        """Получает активные задания, которые можно взять в работу или уже взяты данным СМИ"""
         now = datetime.utcnow()
         
-        query = select(Task).where(
-            and_(
-                Task.status.in_(['new', 'in_progress']),
-                Task.deadline >= now
+        # Базовый запрос для заданий, не просроченных по дедлайну
+        query = select(Task).where(Task.deadline >= now)
+        
+        if media_outlet:
+            # Подзапрос для получения ID заданий, которые уже выполнены этим СМИ
+            completed_tasks_subquery = (
+                select(Submission.task_id)
+                .join(User, User.id == Submission.user_id)
+                .where(
+                    and_(
+                        User.media_outlet == media_outlet,
+                        Submission.status.in_(['approved', 'completed'])
+                    )
+                )
             )
-        )
+            
+            # Подзапрос для получения ID заданий, которые взяты в работу этим СМИ
+            assignments_subquery = (
+                select(TaskAssignment.task_id)
+                .where(TaskAssignment.media_outlet == media_outlet)
+            )
+            
+            # Получаем задания, которые:
+            # 1. Либо новые И не выполнены этим СМИ
+            # 2. Либо взяты в работу этим СМИ И не выполнены
+            query = query.where(
+                and_(
+                    Task.id.notin_(completed_tasks_subquery),  # Исключаем выполненные задания
+                    or_(
+                        Task.status == TaskStatus.NEW,  # Новые задания
+                        Task.id.in_(assignments_subquery)  # Задания этого СМИ
+                    )
+                )
+            )
+        else:
+            # Если СМИ не указано, показываем только новые задания
+            query = query.where(Task.status == TaskStatus.NEW)
+        
+        query = query.order_by(Task.created_at.desc())
         
         result = await self.session.execute(query)
         tasks = result.scalars().all()

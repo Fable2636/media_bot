@@ -4,6 +4,7 @@ from aiogram.types import Message, User
 from src.keyboards.admin_kb import get_admin_main_keyboard
 from src.keyboards.media_kb import get_media_main_keyboard
 from src.keyboards.common_kb import get_start_keyboard
+from src.utils.check_admin import check_admin
 import logging
 
 # Создаем роутер с именем
@@ -20,7 +21,7 @@ async def handle_start_command(message: Message, user: User):
             logging.error("User object is None!")
             return
         
-        is_admin = bool(user.is_admin)
+        is_admin = await check_admin(user)
         logging.info(f"User {user.telegram_id} is_admin: {is_admin}")
         
         if is_admin:
