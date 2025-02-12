@@ -328,20 +328,8 @@ async def handle_revision_comment(
         is_photo_revision = data.get('is_photo_revision', False)
         
         if not submission_id:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="Отправить комментарий",
-                    callback_data="send_text"
-                )
-            ]])
-            await message.answer(
-                "[ERROR] Произошла ошибка. Попробуйте снова.\n\n"
-                "Нажмите кнопку ниже, чтобы отправить комментарий:",
-                reply_markup=keyboard
-            )
-            await state.set_data({
-                'can_send_text': False
-            })
+            await state.clear()
+            await message.answer("Произошла ошибка: не найден ID публикации")
             return
 
         submission_service = SubmissionService(session)
@@ -358,23 +346,13 @@ async def handle_revision_comment(
             submission = await submission_service.get_submission_with_user(submission_id)
             
             if not submission.user:
-                logging.error(f"No user found for submission {submission_id}")
+                await state.clear()
                 await message.answer("Произошла ошибка: пользователь не найден")
-                await state.set_data({
-                    'submission_id': submission_id,
-                    'is_photo_revision': is_photo_revision,
-                    'can_send_text': False
-                })
                 return
                 
             if not submission.user.telegram_id:
-                logging.error(f"No telegram_id found for user of submission {submission_id}")
+                await state.clear()
                 await message.answer("Произошла ошибка: не найден Telegram ID пользователя")
-                await state.set_data({
-                    'submission_id': submission_id,
-                    'is_photo_revision': is_photo_revision,
-                    'can_send_text': False
-                })
                 return
             
             # Отправляем уведомление пользователю
@@ -393,51 +371,28 @@ async def handle_revision_comment(
                 )
             except Exception as e:
                 logging.error(f"Error sending revision notification to user: {e}")
+                await message.answer("Ошибка при отправке уведомления пользователю")
             
             await message.answer("✅ Комментарий отправлен пользователю")
-            await state.set_data({
-                'submission_id': submission_id,
-                'is_photo_revision': is_photo_revision,
-                'can_send_text': False
-            })
+            await state.clear()
             
         except ValueError as e:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="Отправить комментарий",
-                    callback_data="send_text"
-                )
-            ]])
+            await state.clear()
             await message.answer(
-                "[ERROR] {str(e)}\n\n"
-                "Нажмите кнопку ниже, чтобы отправить другой комментарий:",
-                reply_markup=keyboard
+                f"Ошибка: {str(e)}\n\n"
+                "Попробуйте снова через админ панель",
+                reply_markup=get_admin_main_keyboard()
             )
-            await state.set_data({
-                'submission_id': submission_id,
-                'is_photo_revision': is_photo_revision,
-                'can_send_text': False
-            })
             return
         
     except Exception as e:
         logging.error(f"Error in handle_revision_comment: {e}", exc_info=True)
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(
-                text="Отправить комментарий",
-                callback_data="send_text"
-            )
-        ]])
+        await state.clear()
         await message.answer(
-            "[ERROR] Произошла ошибка при отправке комментария.\n\n"
-            "Нажмите кнопку ниже, чтобы попробовать снова:",
-            reply_markup=keyboard
+            "Произошла ошибка при обработке комментария.\n"
+            "Попробуйте снова через админ панель",
+            reply_markup=get_admin_main_keyboard()
         )
-        await state.set_data({
-            'submission_id': data.get('submission_id'),
-            'is_photo_revision': data.get('is_photo_revision'),
-            'can_send_text': False
-        })
 
 @router.message(Command("create"))
 async def cmd_create(message: Message, state: FSMContext, user: User):
@@ -506,19 +461,24 @@ async def cmd_export(message: Message, session: AsyncSession, user: User):
         await message.answer("Произошла ошибка при создании отчета")
 
 @router.message(Command("admin"))
-async def handle_admin_command(message: Message, user: User):
+async def handle_admin_command(message: Message, user: User, state: FSMContext):
     try:
+        # Сначала очищаем состояние
+        await state.clear()
+        
         if not await check_admin(user):
             await message.answer("❌ У вас нет прав администратора")
             return
-            
+        
         await message.answer(
-            "Админ панель",
+            "Добро пожаловать в панель администратора!",
             reply_markup=get_admin_main_keyboard()
         )
+        
     except Exception as e:
         logging.error(f"Error in handle_admin_command: {e}", exc_info=True)
-        await message.answer("Произошла ошибка при открытии админ панели")
+        await message.answer(f"Произошла ошибка при открытии админ панели: {str(e)}")
+        await state.clear()
 
 @router.callback_query(F.data.startswith("review_submission_"))
 async def review_submission(callback: CallbackQuery, session: AsyncSession):
@@ -579,18 +539,20 @@ async def handle_link_submission(
         # Добавляем ссылку на публикацию
         submission = await submission_service.add_published_link(submission_id, message.text)
         
-        # Уведомляем админов о получении ссылки
+        # Уведомляем админов о получении ссылки (просто информационное сообщение)
         from src.config.users import ADMINS
         for admin in ADMINS:
             try:
                 await bot.send_message(
                     admin["telegram_id"],
-                    f"[ANNOUNCE] Пользователь @{message.from_user.username} отправил ссылку на публикацию #{submission.id}:\n{message.text}"
+                    f"ℹ️ Информация о публикации\n"
+                    f"Пользователь @{message.from_user.username} отправил ссылку на публикацию #{submission.id}:\n"
+                    f"{message.text}"
                 )
             except Exception as e:
-                print(f"Не удалось отправить уведомление администратору {admin['username']} (ID: {admin['telegram_id']}): {e}")
+                logging.error(f"Не удалось отправить уведомление администратору {admin['username']}: {e}")
         
-        await message.answer("Ссылка успешно отправлена!")
+        await message.answer("✅ Ссылка успешно отправлена!")
         await state.clear()
         
     except Exception as e:
@@ -837,8 +799,9 @@ async def request_link(callback: CallbackQuery, session: AsyncSession, bot: Bot)
             ]])
         )
         
-        await callback.answer("Запрос на предоставление ссылки отправлен пользователю")
+        # Отправляем подтверждение админу
+        await callback.answer("Запрос на предоставление ссылки отправлен")
         
     except Exception as e:
         logging.error(f"Error in request_link: {e}", exc_info=True)
-        await callback.answer("Произошла ошибка при запросе ссылки")
+        await callback.answer("Произошла ошибка при запросе ссылки", show_alert=True)
