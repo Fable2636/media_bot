@@ -17,6 +17,12 @@ class UserService:
         result = await self.session.execute(query)
         return result.scalars().all()
 
+    async def get_all_admins(self) -> List[User]:
+        """Получает список всех администраторов из базы данных"""
+        query = select(User).where(User.is_admin == True)
+        result = await self.session.execute(query)
+        return result.scalars().all()
+
     async def create_user(self, telegram_id: int, username: str, 
                          is_admin: bool = False, media_outlet: str = None) -> User:
         user = User(
