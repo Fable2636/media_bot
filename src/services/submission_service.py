@@ -46,19 +46,31 @@ class SubmissionService:
         await self.session.refresh(submission)
         return submission
 
-    async def get_pending_submissions(self) -> List[Submission]:
-        """Получает публикации, требующие действий от администратора"""
+    async def get_pending_submissions(self, admin_id: int = None, is_superadmin: bool = False) -> List[Submission]:
+        """Получает публикации, требующие действий от администратора
+        
+        Args:
+            admin_id: ID администратора (для фильтрации по создателю задания)
+            is_superadmin: Является ли пользователь суперадмином
+        """
         query = (
             select(Submission)
             .options(joinedload(Submission.user))
+            .options(joinedload(Submission.task))  # Добавляем загрузку задания
             .where(
                 Submission.status.in_([
                     SubmissionStatus.PENDING.value,
-                    SubmissionStatus.PHOTO_PENDING.value
+                    SubmissionStatus.PHOTO_PENDING.value,
+                    SubmissionStatus.REVISION.value  # Добавляем статус REVISION
                 ])
             )
-            .order_by(Submission.submitted_at.desc())
         )
+        
+        # Если это не суперадмин, фильтруем по создателю задания
+        if not is_superadmin and admin_id is not None:
+            query = query.join(Task).where(Task.created_by == admin_id)
+            
+        query = query.order_by(Submission.submitted_at.desc())
         result = await self.session.execute(query)
         return result.scalars().all()
 

@@ -25,7 +25,7 @@ class UserMiddleware(BaseMiddleware):
         try:
             # Выполняем запрос напрямую через SQL для проверки
             result = await session.execute(
-                text("SELECT id, telegram_id, username, is_admin, media_outlet FROM users WHERE telegram_id = :user_id"),
+                text("SELECT id, telegram_id, username, is_admin, is_superadmin, media_outlet FROM users WHERE telegram_id = :user_id"),
                 {"user_id": user_id}
             )
             row = result.first()
@@ -33,18 +33,21 @@ class UserMiddleware(BaseMiddleware):
             if row:
                 logging.info(f"Raw data from DB: {row}")
                 logging.info(f"Raw is_admin value: {row[3]} (type: {type(row[3])})")
+                logging.info(f"Raw is_superadmin value: {row[4]} (type: {type(row[4])})")
                 
                 # Создаем объект User с данными из запроса
                 user = User()
                 user.id = row[0]
                 user.telegram_id = row[1]
                 user.username = row[2]
-                user.is_admin = row[3]
-                user.media_outlet = row[4]
+                user.is_admin = bool(row[3])
+                user.is_superadmin = bool(row[4])
+                user.media_outlet = row[5]
                 
                 logging.info(f"Created user object: id={user.id}, "
                            f"telegram_id={user.telegram_id}, "
-                           f"is_admin={user.is_admin} (type: {type(user.is_admin)})")
+                           f"is_admin={user.is_admin} (type: {type(user.is_admin)}), "
+                           f"is_superadmin={user.is_superadmin} (type: {type(user.is_superadmin)})")
             else:
                 logging.warning(f"User not found: {user_id}")
                 user = None

@@ -18,6 +18,11 @@ async def set_commands(bot: Bot, session_pool: async_sessionmaker):
             BotCommand(command="stats", description="Статистика")
         ]
         
+        # Команды для суперадмина
+        superadmin_commands = admin_commands + [
+            BotCommand(command="superadmin", description="Панель суперадмина")
+        ]
+        
         async with session_pool() as session:
             user_service = UserService(session)
             for admin in ADMINS:
@@ -25,7 +30,9 @@ async def set_commands(bot: Bot, session_pool: async_sessionmaker):
                     # Проверяем, существует ли пользователь в базе
                     user = await user_service.get_user_by_telegram_id(admin["telegram_id"])
                     if user:
-                        await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin["telegram_id"]))
+                        # Выбираем набор команд в зависимости от статуса пользователя
+                        commands = superadmin_commands if user.is_superadmin else admin_commands
+                        await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=admin["telegram_id"]))
                     else:
                         print(f"Пользователь {admin['username']} (ID: {admin['telegram_id']}) не найден в базе данных")
                 except Exception as e:

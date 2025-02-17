@@ -10,6 +10,7 @@ class User(Base):
     telegram_id = Column(Integer, unique=True, index=True)
     username = Column(String, nullable=True)
     is_admin = Column(Boolean, default=False)
+    is_superadmin = Column(Boolean, default=False)
     media_outlet = Column(String, nullable=True)
 
     # Добавляем связь с заданиями

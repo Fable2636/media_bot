@@ -173,7 +173,10 @@ async def review_posts(callback: CallbackQuery, session: AsyncSession, user: Use
         return
 
     submission_service = SubmissionService(session)
-    submissions = await submission_service.get_pending_submissions()
+    submissions = await submission_service.get_pending_submissions(
+        admin_id=user.id,
+        is_superadmin=bool(user.is_superadmin)
+    )
     
     if not submissions:
         await callback.message.answer("Нет публикаций на модерацию")
@@ -187,6 +190,7 @@ async def review_posts(callback: CallbackQuery, session: AsyncSession, user: Use
             f"ID пользователя: {submission.user.telegram_id}\n"
             f"Имя пользователя: @{submission.user.username}\n"
             f"Задание: #{submission.task_id}\n"
+            f"Создатель задания: {submission.task.created_by}\n"  # Добавляем информацию о создателе
             f"Текст публикации:\n{submission.content}\n"
             f"Дата отправки: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}"
         )
@@ -196,12 +200,12 @@ async def review_posts(callback: CallbackQuery, session: AsyncSession, user: Use
             await callback.message.answer_photo(
                 photo=submission.photo,
                 caption=text,
-                reply_markup=await get_moderation_keyboard(submission.id, session)
+                reply_markup=await get_moderation_keyboard(submission.id)
             )
         else:
             await callback.message.answer(
                 text,
-                reply_markup=await get_moderation_keyboard(submission.id, session)
+                reply_markup=await get_moderation_keyboard(submission.id)
             )
     
     await callback.answer()
@@ -410,7 +414,10 @@ async def cmd_review(message: Message, session: AsyncSession, user: User):
         return
 
     submission_service = SubmissionService(session)
-    submissions = await submission_service.get_pending_submissions()
+    submissions = await submission_service.get_pending_submissions(
+        admin_id=user.id,
+        is_superadmin=bool(user.is_superadmin)
+    )
     
     if not submissions:
         await message.answer("Нет публикаций на модерацию")
@@ -424,6 +431,7 @@ async def cmd_review(message: Message, session: AsyncSession, user: User):
             f"ID пользователя: {submission.user.telegram_id}\n"
             f"Имя пользователя: @{submission.user.username}\n"
             f"Задание: #{submission.task_id}\n"
+            f"Создатель задания: {submission.task.created_by}\n"  # Добавляем информацию о создателе
             f"Текст публикации:\n{submission.content}\n"
             f"Дата отправки: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}"
         )
@@ -433,12 +441,12 @@ async def cmd_review(message: Message, session: AsyncSession, user: User):
             await message.answer_photo(
                 photo=submission.photo,
                 caption=text,
-                reply_markup=await get_moderation_keyboard(submission.id, session)
+                reply_markup=await get_moderation_keyboard(submission.id)
             )
         else:
             await message.answer(
                 text,
-                reply_markup=await get_moderation_keyboard(submission.id, session)
+                reply_markup=await get_moderation_keyboard(submission.id)
             )
 
 @router.message(Command("export"))

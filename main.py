@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from src.config.bot_config import BOT_TOKEN, DATABASE_URL
 from src.utils.logging_config import setup_logging
 
-from src.handlers import admin, media, common, set_commands
+from src.handlers import admin, media, common, superadmin, set_commands
 from src.middlewares.auth import AuthMiddleware
 from src.middlewares.db_middleware import DbSessionMiddleware
 from src.middlewares.user_middleware import UserMiddleware
@@ -47,6 +47,7 @@ async def main():
     dp.callback_query.middleware(UserMiddleware())
     
     # Регистрация роутеров
+    dp.include_router(superadmin.router)
     dp.include_router(admin.router)
     dp.include_router(media.router)
     dp.include_router(common.router)
