@@ -951,7 +951,9 @@ async def handle_link_submission(
             try:
                 await bot.send_message(
                     admin["telegram_id"],
-                    f"✅ Ссылка успешно добавлена. Спасибо!"
+                    f"ℹ️ Информация о задании\n"
+                    f"Пользователь @{message.from_user.username} отправил ссылку на задание #{submission.task_id}:\n"
+                    f"{message.text}"
                 )
             except Exception as e:
                 logging.error(f"Не удалось отправить уведомление администратору {admin['username']}: {e}")
@@ -995,7 +997,7 @@ async def send_user_notification(bot: Bot, submission: Submission):
             ]])
             await bot.send_message(
                 chat_id=submission.user.telegram_id,
-                text="✅ Ваш текст одобрен!\nТеперь необходимо прикрепить фото к публикации.",
+                text="✅ Ваш текст для задания #{submission.task_id} одобрен!\nТеперь необходимо прикрепить фото к публикации.",
                 reply_markup=keyboard
             )
         elif submission.status == SubmissionStatus.APPROVED.value:
@@ -1008,7 +1010,7 @@ async def send_user_notification(bot: Bot, submission: Submission):
             ]])
             await bot.send_message(
                 chat_id=submission.user.telegram_id,
-                text="✅ Ваша публикация полностью одобрена!\nТеперь отправьте ссылку на опубликованный материал.",
+                text="✅ Ваша публикация для задания #{submission.task_id} полностью одобрена!\nТеперь отправьте ссылку на опубликованный материал.",
                 reply_markup=keyboard
             )
         elif submission.status == SubmissionStatus.COMPLETED.value:

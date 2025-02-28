@@ -123,6 +123,7 @@ async def handle_deadline(
                         photo=task.photo,
                         caption=(
                             f"[ANNOUNCE] Новое задание #{task.id}\n"
+                            f"Создано администратором: @{user.username}\n"
                             f"Пресс-релиз: {task.press_release_link}\n"
                             f"Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}"
                         ),
@@ -138,6 +139,7 @@ async def handle_deadline(
                         chat_id=media_user.telegram_id,
                         text=(
                             f"[ANNOUNCE] Новое задание #{task.id}\n"
+                            f"Создано администратором: @{user.username}\n"
                             f"Пресс-релиз: {task.press_release_link}\n"
                             f"Дедлайн: {task.deadline.strftime('%d.%m.%Y %H:%M')}"
                         ),
@@ -185,11 +187,10 @@ async def review_posts(callback: CallbackQuery, session: AsyncSession, user: Use
     for submission in submissions:
         # Формируем текст с полной информацией
         text = (
-            f"[NEW] Публикация #{submission.id}\n"
+            f"[NEW] Задание #{submission.task_id}\n"
             f"От: {submission.user.media_outlet}\n"
             f"ID пользователя: {submission.user.telegram_id}\n"
             f"Имя пользователя: @{submission.user.username}\n"
-            f"Задание: #{submission.task_id}\n"
             f"Создатель задания: {submission.task.created_by}\n"  # Добавляем информацию о создателе
             f"Текст публикации:\n{submission.content}\n"
             f"Дата отправки: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}"
@@ -200,12 +201,12 @@ async def review_posts(callback: CallbackQuery, session: AsyncSession, user: Use
             await callback.message.answer_photo(
                 photo=submission.photo,
                 caption=text,
-                reply_markup=await get_moderation_keyboard(submission.id)
+                reply_markup=await get_moderation_keyboard(submission.id, session)
             )
         else:
             await callback.message.answer(
                 text,
-                reply_markup=await get_moderation_keyboard(submission.id)
+                reply_markup=await get_moderation_keyboard(submission.id, session)
             )
     
     await callback.answer()
@@ -248,7 +249,7 @@ async def approve_submission(callback: CallbackQuery, session: AsyncSession, use
                 reply_markup=callback.message.reply_markup
             )
         else:
-            message_text = f"[NEW] Публикация #{submission.id} одобрена ✅"
+            message_text = f"[NEW] Задание #{submission.task_id} одобрено ✅"
             await callback.message.edit_text(
                 message_text,
                 reply_markup=callback.message.reply_markup
@@ -364,8 +365,8 @@ async def handle_revision_comment(
             try:
                 await bot.send_message(
                     chat_id=submission.user.telegram_id,
-                    text=f"⚠️ {content_type.capitalize()} для публикации #{submission.id} требует доработки.\n"
-                         f"Комментарий: {message.text}",
+                    text=f"⚠️ {content_type.capitalize()} для задания #{submission.task_id} требует доработки.\n"
+                         f"Комментарий от администратора @{message.from_user.username}:\n{message.text}",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                         InlineKeyboardButton(
                             text="Отправить исправленный текст",
@@ -426,11 +427,10 @@ async def cmd_review(message: Message, session: AsyncSession, user: User):
     for submission in submissions:
         # Формируем текст с полной информацией
         text = (
-            f"📨 Публикация #{submission.id}\n"
+            f"📨 Задание #{submission.task_id}\n"
             f"От: {submission.user.media_outlet}\n"
             f"ID пользователя: {submission.user.telegram_id}\n"
             f"Имя пользователя: @{submission.user.username}\n"
-            f"Задание: #{submission.task_id}\n"
             f"Создатель задания: {submission.task.created_by}\n"  # Добавляем информацию о создателе
             f"Текст публикации:\n{submission.content}\n"
             f"Дата отправки: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}"
@@ -441,12 +441,12 @@ async def cmd_review(message: Message, session: AsyncSession, user: User):
             await message.answer_photo(
                 photo=submission.photo,
                 caption=text,
-                reply_markup=await get_moderation_keyboard(submission.id)
+                reply_markup=await get_moderation_keyboard(submission.id, session)
             )
         else:
             await message.answer(
                 text,
-                reply_markup=await get_moderation_keyboard(submission.id)
+                reply_markup=await get_moderation_keyboard(submission.id, session)
             )
 
 @router.message(Command("export"))
@@ -499,7 +499,7 @@ async def review_submission(callback: CallbackQuery, session: AsyncSession):
         return
 
     text = (
-        f"[NEW] Публикация #{submission.id}\n"
+        f"[NEW] Задание #{submission.task_id}\n"
         f"От: {submission.user.media_outlet}\n"
         f"Задание: #{submission.task_id}\n"
         f"Текст:\n{submission.content}"
@@ -798,7 +798,7 @@ async def request_link(callback: CallbackQuery, session: AsyncSession, bot: Bot)
         # Отправляем уведомление пользователю
         await bot.send_message(
             chat_id=submission.user.telegram_id,
-            text=f"🔗 Пожалуйста, отправьте ссылку на опубликованный материал для публикации #{submission.id}",
+            text=f"🔗 Пожалуйста, отправьте ссылку на опубликованный материал для задания #{submission.task_id}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(
                     text="Отправить ссылку",
