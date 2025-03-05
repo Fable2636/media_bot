@@ -997,7 +997,7 @@ async def send_user_notification(bot: Bot, submission: Submission):
             ]])
             await bot.send_message(
                 chat_id=submission.user.telegram_id,
-                text="✅ Ваш текст для задания #{submission.task_id} одобрен!\nТеперь необходимо прикрепить фото к публикации.",
+                text=f"✅ Ваш текст для задания #{submission.task_id} одобрен!\nТеперь необходимо прикрепить фото к публикации.",
                 reply_markup=keyboard
             )
         elif submission.status == SubmissionStatus.APPROVED.value:
@@ -1010,14 +1010,14 @@ async def send_user_notification(bot: Bot, submission: Submission):
             ]])
             await bot.send_message(
                 chat_id=submission.user.telegram_id,
-                text="✅ Ваша публикация для задания #{submission.task_id} полностью одобрена!\nТеперь отправьте ссылку на опубликованный материал.",
+                text=f"✅ Ваша публикация для задания #{submission.task_id} полностью одобрена!\nТеперь отправьте ссылку на опубликованный материал.",
                 reply_markup=keyboard
             )
         elif submission.status == SubmissionStatus.COMPLETED.value:
             # Если публикация завершена
             await bot.send_message(
                 chat_id=submission.user.telegram_id,
-                text="✅ Ваша публикация успешно завершена! Спасибо за сотрудничество.",
+                text=f"✅ Ваша публикация для задания #{submission.task_id} успешно завершена! Спасибо за сотрудничество.",
                 reply_markup=get_media_main_keyboard()
             )
     except Exception as e:
