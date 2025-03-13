@@ -13,6 +13,8 @@ from src.database.models.submission import SubmissionStatus
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 from aiogram.exceptions import TelegramBadRequest
+import re
+from sqlalchemy import select
 
 router = Router()
 
@@ -228,7 +230,7 @@ async def handle_submit_task(
             'is_blocked': False
         })
         
-        await callback.message.answer("❌ Пожалуйста, отправьте текст публикации:")
+        await callback.message.answer("❌ Пожалуйста, отправьте текст задания:")
         await callback.answer()
         
     except Exception as e:
@@ -258,9 +260,10 @@ async def handle_revision_request(
         # Сохраняем submission_id и task_id в состоянии
         await state.update_data(
             submission_id=submission_id,
-            task_id=submission.task_id,
+            task_id=submission.task_id,  # Важно: сохраняем task_id из публикации
             is_photo_revision=is_photo_revision,
-            can_send_text=False  # Устанавливаем флаг в False, пока не нажата кнопка
+            can_send_text=True,  # Сразу разрешаем отправку текста
+            is_blocked=False  # Убираем блокировку
         )
         
         # Переходим в соответствующее состояние
@@ -269,16 +272,8 @@ async def handle_revision_request(
             await callback.message.answer("❌ Пожалуйста, отправьте исправленное фото.")
         else:
             await state.set_state(TaskStates.waiting_for_text)
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="Отправить текст",
-                    callback_data="send_text"
-                )
-            ]])
-            await callback.message.answer(
-                "❌ Для отправки текста нажмите кнопку ниже:",
-                reply_markup=keyboard
-            )
+            await callback.message.answer("❌ Пожалуйста, отправьте исправленный текст задания:")
+            
         await callback.answer()
         
     except Exception as e:
@@ -354,7 +349,7 @@ async def handle_submission_text(
                     )
                 ]])
                 await message.answer(
-                    "❌ Публикация не найдена.",
+                    "❌ Задание не найдено.",
                     reply_markup=keyboard
                 )
                 # Блокируем отправку и сохраняем данные
@@ -374,7 +369,7 @@ async def handle_submission_text(
                     )
                 ]])
                 await message.answer(
-                    "❌ Нельзя отправить исправленный текст. Публикация не находится на доработке.",
+                    "❌ Нельзя отправить исправленный текст. Задание не находится на доработке.",
                     reply_markup=keyboard
                 )
                 # Блокируем отправку и сохраняем данные
@@ -407,7 +402,7 @@ async def handle_submission_text(
                     )
                 ]])
                 await message.answer(
-                    "❌ У вас уже есть публикация для этого задания. Нельзя создать больше одной публикации.",
+                    "❌ У вас уже есть текст для этого задания. Нельзя создать больше одного текста.",
                     reply_markup=keyboard
                 )
                 # Блокируем отправку и сохраняем данные
@@ -420,25 +415,85 @@ async def handle_submission_text(
                 return
                 
             # Создаем новую публикацию
+            if not task_id:
+                logging.error("task_id is missing when creating submission")
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="Отправить текст",
+                        callback_data="send_text"
+                    )
+                ]])
+                await message.answer(
+                    "❌ Произошла ошибка при создании текста. Попробуйте снова.",
+                    reply_markup=keyboard
+                )
+                await state.set_data({
+                    'can_send_text': False,
+                    'is_blocked': True
+                })
+                return
+
+            # Проверяем существование задания
+            task_service = TaskService(session)
+            task = await task_service.get_task_by_id(task_id)
+            
+            if not task:
+                logging.error(f"Task {task_id} not found when creating submission")
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="Отправить текст",
+                        callback_data="send_text"
+                    )
+                ]])
+                await message.answer(
+                    "❌ Задание не найдено. Попробуйте снова.",
+                    reply_markup=keyboard
+                )
+                await state.set_data({
+                    'can_send_text': False,
+                    'is_blocked': True
+                })
+                return
+
+            logging.info(f"Creating submission with task_id {task_id} for task {task}")
             submission = await submission_service.create_submission(
                 task_id=task_id,
                 user_id=user.id,
                 content=message.text,
                 photo=None
             )
+            
+            if not submission or not submission.task:
+                logging.error(f"Failed to create submission for task {task_id} or task not loaded")
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="Отправить текст",
+                        callback_data="send_text"
+                    )
+                ]])
+                await message.answer(
+                    "❌ Не удалось создать текст. Попробуйте снова.",
+                    reply_markup=keyboard
+                )
+                await state.set_data({
+                    'task_id': task_id,
+                    'can_send_text': False,
+                    'is_blocked': True
+                })
+                return
+                
             action_text = "новый "
         
-        # Уведомляем админов о публикации
+        # Уведомляем админов о тексте
         from src.config.users import ADMINS
         for admin in ADMINS:
             try:
                 notification_text = (
-                    f"📨 {action_text}текст для публикации #{submission.id}\n"
+                    f"📨 {action_text}текст для задания #{submission.task_id}\n"
                     f"От: {user.media_outlet}\n"
                     f"ID пользователя: {user.telegram_id}\n"
                     f"Имя пользователя: @{user.username}\n"
-                    f"Задание: #{task_id}\n\n"
-                    f"Текст публикации:\n{message.text}"
+                    f"Текст задания:\n{message.text}"
                 )
                 
                 keyboard = await get_moderation_keyboard(submission.id)
@@ -497,7 +552,7 @@ async def approve_submission(callback: CallbackQuery, session: AsyncSession, bot
         # Обновляем сообщение админа
         message_text = callback.message.text or callback.message.caption
         if message_text:
-            status_text = "✅ Текст одобрен" if submission.status == SubmissionStatus.TEXT_APPROVED.value else "✅ Публикация полностью одобрена"
+            status_text = "✅ Текст одобрен" if submission.status == SubmissionStatus.TEXT_APPROVED.value else "✅ Задание полностью одобрено"
             message_text = message_text.split("\nСтатус:")[0] + f"\nСтатус: {status_text}"
             
             try:
@@ -521,11 +576,11 @@ async def approve_submission(callback: CallbackQuery, session: AsyncSession, bot
         if submission.status == SubmissionStatus.TEXT_APPROVED.value:
             await callback.answer("Текст одобрен. Ожидаем фото от пользователя.")
         elif submission.status == SubmissionStatus.APPROVED.value:
-            await callback.answer("Публикация полностью одобрена.")
+            await callback.answer("Задание полностью одобрено.")
         
     except Exception as e:
         logging.error(f"Error approving submission: {e}", exc_info=True)
-        await callback.answer("Произошла ошибка при одобрении публикации")
+        await callback.answer("Произошла ошибка при одобрении задания")
 
 @router.callback_query(F.data.startswith("attach_photo_"))
 async def handle_attach_photo(callback: CallbackQuery, state: FSMContext):
@@ -684,11 +739,11 @@ async def handle_photo_submission(
                     chat_id=admin["telegram_id"],
                     photo=photo,
                     caption=(
-                        f"📸 {'Исправленное' if submission.status == SubmissionStatus.REVISION.value else 'Новое'} фото для публикации #{submission.id}\n"
+                        f"📸 {'Исправленное' if submission.status == SubmissionStatus.REVISION.value else 'Новое'} фото для задания #{submission.task_id}\n"
                         f"От: {submission.user.media_outlet}\n"
                         f"ID пользователя: {submission.user.telegram_id}\n"
                         f"Имя пользователя: @{submission.user.username}\n\n"
-                        f"Текст публикации:\n{text_preview}"
+                        f"Текст задания:\n{text_preview}"
                     ),
                     reply_markup=await get_moderation_keyboard(submission.id)
                 )
@@ -699,7 +754,7 @@ async def handle_photo_submission(
         await send_user_notification(bot, submission)
         
         await message.answer(
-            "✅ Фото успешно добавлено к публикации. Ожидайте одобрения.",
+            "✅ Фото успешно добавлено к заданию. Ожидайте одобрения.",
             reply_markup=get_media_main_keyboard()
         )
         await state.clear()
@@ -736,13 +791,13 @@ async def show_submission_details(message: Message, submission: Submission):
         SubmissionStatus.PENDING.value: '🕒 Текст на проверке',
         SubmissionStatus.TEXT_APPROVED.value: '✅ Текст одобрен, ожидается фото',
         SubmissionStatus.PHOTO_PENDING.value: '🕒 Фото на проверке',
-        SubmissionStatus.APPROVED.value: '✅ Публикация одобрена',
+        SubmissionStatus.APPROVED.value: '✅ Задание одобрено',
         SubmissionStatus.REVISION.value: '📝 Требует доработки',
         SubmissionStatus.COMPLETED.value: '✅ Опубликовано'
     }.get(submission.status, submission.status)
     
     text = (
-        f"Публикация #{submission.id}\n"
+        f"Задание #{submission.task_id}\n"
         f"Статус: {status_text}\n"
         f"Дата отправки: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}\n"
     )
@@ -768,7 +823,7 @@ async def show_submission_details(message: Message, submission: Submission):
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(
                     text="Отправить исправленный текст",
-                    callback_data=f"send_text_{submission.id}"
+                    callback_data=f"submit_revision_{submission.id}"
                 )
             ]])
     elif submission.status == SubmissionStatus.TEXT_APPROVED.value:
@@ -904,7 +959,7 @@ async def handle_link_submission(
                 )
             ]])
             await message.answer(
-                "❌ Публикация не найдена.",
+                "❌ Задание не найдено.",
                 reply_markup=keyboard
             )
             await state.clear()
@@ -919,7 +974,7 @@ async def handle_link_submission(
                 )
             ]])
             await message.answer(
-                "❌ Вы уже отправляли ссылку для этой публикации. Повторная отправка невозможна.",
+                "❌ Вы уже отправляли ссылку для этого задания. Повторная отправка невозможна.",
                 reply_markup=keyboard
             )
             await state.clear()
@@ -933,7 +988,7 @@ async def handle_link_submission(
                 )
             ]])
             await message.answer(
-                "❌ Нельзя отправить ссылку, пока публикация не одобрена полностью.",
+                "❌ Нельзя отправить ссылку, пока задание не одобрено полностью.",
                 reply_markup=keyboard
             )
             await state.clear()
@@ -1166,7 +1221,7 @@ async def prompt_for_text(callback: CallbackQuery, state: FSMContext, session: A
             'is_blocked': False
         })
         
-        await callback.message.answer("❌ Пожалуйста, отправьте исправленный текст публикации:")
+        await callback.message.answer("❌ Пожалуйста, отправьте исправленный текст задания:")
         await callback.answer()
         
     except Exception as e:
@@ -1245,7 +1300,7 @@ async def handle_revision_comment(
         
         if not submission:
             await message.answer(
-                "❌ Публикация не найдена.",
+                "❌ Задание не найдено.",
                 reply_markup=get_media_main_keyboard()
             )
             await state.clear()
@@ -1263,7 +1318,7 @@ async def handle_revision_comment(
             try:
                 await bot.send_message(
                     admin["telegram_id"],
-                    f"📨 Добавлен комментарий к публикации #{submission.id}\n"
+                    f"📨 Добавлен комментарий к заданию #{submission.task_id}\n"
                     f"От: {submission.user.media_outlet}\n"
                     f"ID пользователя: {submission.user.telegram_id}\n"
                     f"Имя пользователя: @{submission.user.username}\n\n"
@@ -1297,19 +1352,93 @@ async def handle_revision_comment(
         })
 
 @router.callback_query(F.data == "send_text")
-async def prompt_for_new_text(callback: CallbackQuery, state: FSMContext):
-    # Сохраняем текущие данные из состояния
-    data = await state.get_data()
-    
-    # Устанавливаем состояние ожидания текста
-    await state.set_state(TaskStates.waiting_for_text)
-    
-    # Разрешаем отправку текста и убираем блокировку
-    await state.set_data({
-        'task_id': data.get('task_id'),
-        'can_send_text': True,
-        'is_blocked': False
-    })
-    
-    await callback.message.answer("❌ Пожалуйста, отправьте текст публикации:")
-    await callback.answer()
+async def prompt_for_new_text(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    try:
+        logging.info("Starting prompt_for_new_text handler")
+        
+        # Получаем текущие данные из состояния
+        data = await state.get_data()
+        task_id = data.get('task_id')
+        submission_id = data.get('submission_id')
+        logging.info(f"Task ID from state: {task_id}, Submission ID: {submission_id}")
+        
+        # Если есть submission_id, получаем публикацию
+        if submission_id:
+            submission_service = SubmissionService(session)
+            submission = await submission_service.get_submission(submission_id)
+            if submission:
+                task_id = submission.task_id
+                logging.info(f"Found submission {submission_id} with task_id {task_id}")
+        
+        # Если task_id всё ещё нет, пытаемся получить его из текста сообщения
+        if not task_id:
+            message_text = callback.message.text or callback.message.caption
+            logging.info(f"Message text: {message_text}")
+            
+            if message_text:
+                task_patterns = [
+                    r'Задание #(\d+)',
+                    r'задание #(\d+)',
+                    r'задания #(\d+)',
+                    r'#(\d+)'
+                ]
+                
+                for pattern in task_patterns:
+                    task_match = re.search(pattern, message_text, re.IGNORECASE)
+                    if task_match:
+                        task_id = int(task_match.group(1))
+                        logging.info(f"Found task_id {task_id} using pattern {pattern}")
+                        break
+        
+        if not task_id:
+            logging.error("Failed to extract task_id from any source")
+            await callback.answer("Ошибка: не удалось определить ID задания", show_alert=True)
+            return
+            
+        # Получаем пользователя
+        user_query = select(User).where(User.telegram_id == callback.from_user.id)
+        user_result = await session.execute(user_query)
+        user = user_result.scalar_one_or_none()
+        
+        if not user:
+            logging.error(f"User not found for telegram_id {callback.from_user.id}")
+            await callback.answer("Ошибка: пользователь не найден", show_alert=True)
+            return
+            
+        # Проверяем существование задания в базе данных
+        task_service = TaskService(session)
+        task = await task_service.get_task_by_id(task_id)
+        
+        if not task:
+            logging.error(f"Task {task_id} not found in database")
+            await callback.answer("Ошибка: задание не найдено в базе данных", show_alert=True)
+            return
+            
+        logging.info(f"Found task in database: {task.id}")
+        
+        # Проверяем, взято ли задание этим СМИ
+        assignment = await task_service.get_task_assignment(task_id, user.media_outlet)
+        if not assignment and not submission_id:  # Пропускаем проверку если это исправление существующей публикации
+            logging.error(f"Media outlet {user.media_outlet} has not taken task {task_id}")
+            await callback.answer("Вы не можете отправить текст для этого задания. Сначала возьмите его в работу.", show_alert=True)
+            return
+        
+        # Устанавливаем состояние ожидания текста
+        await state.set_state(TaskStates.waiting_for_text)
+        
+        # Сохраняем данные в состоянии
+        state_data = {
+            'task_id': task_id,
+            'submission_id': submission_id,  # Сохраняем submission_id если он есть
+            'can_send_text': True,
+            'is_blocked': False
+        }
+        await state.set_data(state_data)
+        logging.info(f"State data set: {state_data}")
+        
+        await callback.message.edit_text("Пожалуйста, отправьте текст задания:")
+        await callback.answer()
+        
+    except Exception as e:
+        logging.error(f"Error in prompt_for_new_text: {e}", exc_info=True)
+        await callback.answer("Произошла ошибка при обработке запроса", show_alert=True)

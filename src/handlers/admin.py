@@ -192,7 +192,7 @@ async def review_posts(callback: CallbackQuery, session: AsyncSession, user: Use
             f"ID пользователя: {submission.user.telegram_id}\n"
             f"Имя пользователя: @{submission.user.username}\n"
             f"Создатель задания: {submission.task.created_by}\n"  # Добавляем информацию о создателе
-            f"Текст публикации:\n{submission.content}\n"
+            f"Текст задания:\n{submission.content}\n"
             f"Дата отправки: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}"
         )
         
@@ -221,13 +221,13 @@ async def approve_submission(callback: CallbackQuery, session: AsyncSession, use
     submission_service = SubmissionService(session)
 
     try:
-        # Получаем публикацию с данными пользователя
+        # Получаем задание с данными пользователя
         submission = await submission_service.get_submission_with_user(submission_id)
         if not submission:
-            await callback.answer("Публикация не найдена", show_alert=True)
+            await callback.answer("Задание не найдено", show_alert=True)
             return
 
-        # Пытаемся одобрить публикацию
+        # Пытаемся одобрить задание
         try:
             submission = await submission_service.approve_submission(submission_id)
             logging.info(f"Submission {submission_id} approved successfully")
@@ -264,7 +264,7 @@ async def approve_submission(callback: CallbackQuery, session: AsyncSession, use
 
     except Exception as e:
         logging.error(f"Error approving submission: {e}")
-        await callback.answer("Произошла ошибка при одобрении публикации", show_alert=True)
+        await callback.answer("Произошла ошибка при одобрении задания", show_alert=True)
 
 @router.callback_query(F.data.startswith("request_revision_"))
 async def request_revision(callback: CallbackQuery, state: FSMContext, session: AsyncSession, user: User):
@@ -275,25 +275,25 @@ async def request_revision(callback: CallbackQuery, state: FSMContext, session: 
     try:
         submission_id = int(callback.data.split("_")[-1])
         
-        # Получаем публикацию для проверки статуса
+        # Получаем задание для проверки статуса
         submission_service = SubmissionService(session)
         submission = await submission_service.get_submission_with_user(submission_id)
         
         if not submission:
-            await callback.answer("Публикация не найдена", show_alert=True)
+            await callback.answer("Задание не найдено", show_alert=True)
             return
             
         # Проверяем возможность отправки на доработку
         if submission.status == SubmissionStatus.REVISION.value:
-            await callback.message.answer("❌ Публикация уже находится на доработке")
+            await callback.message.answer("❌ Задание уже находится на доработке")
             await callback.answer()
             return
         elif submission.status == SubmissionStatus.COMPLETED.value:
-            await callback.message.answer("❌ Нельзя отправить на доработку завершенную публикацию")
+            await callback.message.answer("❌ Нельзя отправить на доработку завершенное задание")
             await callback.answer()
             return
         elif submission.status == SubmissionStatus.APPROVED.value:
-            await callback.message.answer("❌ Нельзя отправить на доработку одобренную публикацию")
+            await callback.message.answer("❌ Нельзя отправить на доработку одобренное задание")
             await callback.answer()
             return
             
@@ -334,7 +334,7 @@ async def handle_revision_comment(
         
         if not submission_id:
             await state.clear()
-            await message.answer("Произошла ошибка: не найден ID публикации")
+            await message.answer("Произошла ошибка: не найден ID задания")
             return
 
         submission_service = SubmissionService(session)
@@ -347,7 +347,7 @@ async def handle_revision_comment(
                 is_photo_revision=is_photo_revision
             )
             
-            # Получаем обновленную публикацию с данными пользователя
+            # Получаем обновленное задание с данными пользователя
             submission = await submission_service.get_submission_with_user(submission_id)
             
             if not submission.user:
@@ -370,7 +370,7 @@ async def handle_revision_comment(
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                         InlineKeyboardButton(
                             text="Отправить исправленный текст",
-                            callback_data="send_text"
+                            callback_data=f"submit_revision_{submission.id}"
                         )
                     ]])
                 )
@@ -432,7 +432,7 @@ async def cmd_review(message: Message, session: AsyncSession, user: User):
             f"ID пользователя: {submission.user.telegram_id}\n"
             f"Имя пользователя: @{submission.user.username}\n"
             f"Создатель задания: {submission.task.created_by}\n"  # Добавляем информацию о создателе
-            f"Текст публикации:\n{submission.content}\n"
+            f"Текст задания:\n{submission.content}\n"
             f"Дата отправки: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}"
         )
         
@@ -495,14 +495,14 @@ async def review_submission(callback: CallbackQuery, session: AsyncSession):
     submission = await submission_service.get_submission_with_user(submission_id)
 
     if submission.content is None:
-        await callback.answer("Текст публикации отсутствует.")
+        await callback.answer("Текст задания отсутствует.")
         return
 
     text = (
         f"[NEW] Задание #{submission.task_id}\n"
         f"От: {submission.user.media_outlet}\n"
         f"Задание: #{submission.task_id}\n"
-        f"Текст:\n{submission.content}"
+        f"Текст задания:\n{submission.content}"
     )
 
     await callback.message.answer(
@@ -515,7 +515,7 @@ async def review_submission(callback: CallbackQuery, session: AsyncSession):
 async def handle_send_link(callback: CallbackQuery, state: FSMContext):
     submission_id = int(callback.data.split("_")[-1])
     
-    # Сохраняем ID публикации в состоянии
+    # Сохраняем ID задания в состоянии
     await state.update_data(submission_id=submission_id)
     
     # Переводим пользователя в состояние ожидания ссылки
@@ -537,14 +537,14 @@ async def handle_link_submission(
     submission_service = SubmissionService(session)
     
     try:
-        # Проверяем существование публикации
+        # Проверяем существование задания
         submission = await submission_service.get_submission(submission_id)
         if not submission:
-            await message.answer("Публикация не найдена. Возможно, она была удалена.")
+            await message.answer("Задание не найдено. Возможно, оно было удалено.")
             await state.clear()
             return
         
-        # Добавляем ссылку на публикацию
+        # Добавляем ссылку на задание
         submission = await submission_service.add_published_link(submission_id, message.text)
         
         # Уведомляем админов о получении ссылки (просто информационное сообщение)
@@ -553,8 +553,8 @@ async def handle_link_submission(
             try:
                 await bot.send_message(
                     admin["telegram_id"],
-                    f"ℹ️ Информация о публикации\n"
-                    f"Пользователь @{message.from_user.username} отправил ссылку на публикацию #{submission.id}:\n"
+                    f"ℹ️ Информация о задании\n"
+                    f"Пользователь @{message.from_user.username} отправил ссылку на задание #{submission.id}:\n"
                     f"{message.text}"
                 )
             except Exception as e:
@@ -664,7 +664,7 @@ async def list_tasks_for_deletion(
     await callback.answer()
 
 async def get_moderation_keyboard(submission_id: int, session: AsyncSession) -> InlineKeyboardMarkup:
-    """Создает клавиатуру для модерации публикации"""
+    """Создает клавиатуру для модерации задания"""
     submission_service = SubmissionService(session)
     submission = await submission_service.get_submission(submission_id)
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -783,12 +783,12 @@ async def request_link(callback: CallbackQuery, session: AsyncSession, bot: Bot)
     try:
         submission_id = int(callback.data.split("_")[-1])
         
-        # Получаем публикацию с данными пользователя
+        # Получаем задание с данными пользователя
         submission_service = SubmissionService(session)
         submission = await submission_service.get_submission_with_user(submission_id)
         
         if not submission:
-            await callback.answer("Публикация не найдена", show_alert=True)
+            await callback.answer("Задание не найдено", show_alert=True)
             return
             
         if not submission.user:

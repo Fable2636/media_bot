@@ -25,7 +25,10 @@ class SubmissionService:
         task = await task_service.get_task_by_id(task_id)
         
         if not task:
+            logging.error(f"Task {task_id} not found when creating submission")
             return None  # Задание не существует
+            
+        logging.info(f"Found task {task_id} when creating submission: {task}")
             
         # Проверяем, нет ли уже публикации от этого пользователя для данного задания
         existing_submission = await self.get_user_submission_for_task(user_id, task_id)
@@ -33,18 +36,38 @@ class SubmissionService:
             logging.error(f"User {user_id} already has a submission for task {task_id}")
             return None  # У пользователя уже есть публикация для этого задания
         
-        submission = Submission(
-            task_id=task_id,
-            user_id=user_id,
-            content=content,
-            photo=photo,
-            submitted_at=datetime.now(),
-            status=SubmissionStatus.PENDING.value
-        )
-        self.session.add(submission)
-        await self.session.commit()
-        await self.session.refresh(submission)
-        return submission
+        try:
+            submission = Submission(
+                task_id=task_id,
+                user_id=user_id,
+                content=content,
+                photo=photo,
+                submitted_at=datetime.now(),
+                status=SubmissionStatus.PENDING.value
+            )
+            self.session.add(submission)
+            await self.session.commit()
+            await self.session.refresh(submission)
+            
+            logging.info(f"Created submission {submission.id} with task_id {submission.task_id}")
+            
+            # Получаем публикацию с загруженным заданием
+            submission = await self.get_submission_with_user(submission.id)
+            if not submission:
+                logging.error(f"Failed to load submission {submission.id} after creation")
+                return None
+                
+            if not submission.task:
+                logging.error(f"Task not loaded for submission {submission.id}")
+                return None
+                
+            logging.info(f"Loaded submission {submission.id} with task {submission.task_id} and task object {submission.task}")
+            return submission
+            
+        except Exception as e:
+            logging.error(f"Error creating submission: {e}", exc_info=True)
+            await self.session.rollback()
+            return None
 
     async def get_pending_submissions(self, admin_id: int = None, is_superadmin: bool = False) -> List[Submission]:
         """Получает публикации, требующие действий от администратора
@@ -260,23 +283,31 @@ class SubmissionService:
         query = (
             select(Submission)
             .options(joinedload(Submission.user))
+            .options(joinedload(Submission.task))  # Добавляем загрузку задания
             .where(Submission.id == submission_id)
         )
         result = await self.session.execute(query)
-        return result.scalar_one()
+        return result.scalar_one_or_none()  # Используем scalar_one_or_none вместо scalar_one
 
-    async def get_submission(self, submission_id: int) -> Submission:
+    async def get_submission(self, submission_id: int) -> Optional[Submission]:
         """Получает публикацию по ID"""
-        query = select(Submission).where(Submission.id == submission_id)
+        query = (
+            select(Submission)
+            .options(joinedload(Submission.user))
+            .options(joinedload(Submission.task))
+            .where(Submission.id == submission_id)
+        )
         result = await self.session.execute(query)
-        return result.scalar()
+        return result.scalar_one_or_none()
 
     async def get_user_submission_for_task(self, user_id: int, task_id: int) -> Optional[Submission]:
         """Получает публикацию пользователя для конкретного задания"""
         query = (
             select(Submission)
+            .options(joinedload(Submission.user))
+            .options(joinedload(Submission.task))
             .where(Submission.user_id == user_id)
             .where(Submission.task_id == task_id)
         )
         result = await self.session.execute(query)
-        return result.scalar()
+        return result.scalar_one_or_none()
