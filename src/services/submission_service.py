@@ -76,6 +76,7 @@ class SubmissionService:
             admin_id: ID администратора (для фильтрации по создателю задания)
             is_superadmin: Является ли пользователь суперадмином
         """
+        logging.info(f"Вызов get_pending_submissions с admin_id={admin_id}, is_superadmin={is_superadmin}")
         query = (
             select(Submission)
             .options(joinedload(Submission.user))
@@ -91,11 +92,20 @@ class SubmissionService:
         
         # Если это не суперадмин, фильтруем по создателю задания
         if not is_superadmin and admin_id is not None:
+            logging.info(f"Применяем фильтрацию по создателю задания: admin_id={admin_id}")
             query = query.join(Task).where(Task.created_by == admin_id)
             
         query = query.order_by(Submission.submitted_at.desc())
-        result = await self.session.execute(query)
-        return result.scalars().all()
+        logging.info(f"SQL запрос: {query}")
+        
+        try:
+            result = await self.session.execute(query)
+            submissions = result.scalars().all()
+            logging.info(f"Получено публикаций: {len(submissions)}")
+            return submissions
+        except Exception as e:
+            logging.error(f"Ошибка при выполнении get_pending_submissions: {e}", exc_info=True)
+            raise
 
     async def approve_submission(self, submission_id: int) -> Submission:
         """Одобряет публикацию"""

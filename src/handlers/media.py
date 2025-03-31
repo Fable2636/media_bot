@@ -5,6 +5,7 @@ from aiogram.fsm.context import FSMContext
 from src.states.task_states import TaskStates
 from src.services.task_service import TaskService
 from src.services.submission_service import SubmissionService
+from src.services.user_service import UserService
 from src.keyboards.media_kb import get_media_main_keyboard, get_task_keyboard
 from src.keyboards.moderation_kb import get_moderation_keyboard
 from src.utils.logger import logger
@@ -289,250 +290,123 @@ async def handle_submission_text(
     bot: Bot
 ):
     try:
-        # Проверяем, был ли переход по кнопке
+        logging.info(f"Пользователь {user.username} отправил текст")
         data = await state.get_data()
+        
+        # Проверяем, имеет ли пользователь право отправить текст
+        can_send_text = data.get('can_send_text', False)
+        if not can_send_text:
+            logging.warning(f"Попытка отправки текста без разрешения: {user.username}")
+            await message.answer("Вы не можете отправить текст в данный момент")
+            return
+            
+        if 'is_blocked' in data and data['is_blocked']:
+            logging.warning(f"Попытка отправки текста заблокированным пользователем: {user.username}")
+            await message.answer("Отправка текста временно заблокирована")
+            return
+        
+        # Определяем, является ли это отправкой текста для существующей публикации
         submission_id = data.get('submission_id')
-        task_id = data.get('task_id')
+        is_revision = submission_id is not None
         
-        # Если отправка заблокирована или не было нажатия кнопки
-        if data.get('is_blocked') or not data.get('can_send_text', False):
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="Отправить текст",
-                    callback_data=f"send_text_{submission_id}" if submission_id else "send_text"
-                )
-            ]])
-            await message.answer(
-                "❌ Для отправки текста нажмите кнопку ниже:",
-                reply_markup=keyboard
-            )
-            # Блокируем отправку и сохраняем данные
-            await state.set_data({
-                'task_id': task_id,
-                'submission_id': submission_id,
-                'can_send_text': False,
-                'is_blocked': True
-            })
-            return
-
-        # Проверяем длину текста
-        if len(message.text) > 3500:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="Отправить текст",
-                    callback_data=f"send_text_{submission_id}" if submission_id else "send_text"
-                )
-            ]])
-            await message.answer(
-                "❌ Текст слишком длинный. Максимальная длина - 3500 символов.",
-                reply_markup=keyboard
-            )
-            # Блокируем отправку и сохраняем данные
-            await state.set_data({
-                'task_id': task_id,
-                'submission_id': submission_id,
-                'can_send_text': False,
-                'is_blocked': True
-            })
-            return
-        
-        submission_service = SubmissionService(session)
-        
-        if submission_id:
-            # Проверяем статус публикации перед обновлением
-            submission = await submission_service.get_submission(submission_id)
-            if not submission:
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Отправить текст",
-                        callback_data=f"send_text_{submission_id}"
-                    )
-                ]])
-                await message.answer(
-                    "❌ Задание не найдено.",
-                    reply_markup=keyboard
-                )
-                # Блокируем отправку и сохраняем данные
-                await state.set_data({
-                    'task_id': task_id,
-                    'submission_id': submission_id,
-                    'can_send_text': False,
-                    'is_blocked': True
-                })
-                return
-                
-            if submission.status != SubmissionStatus.REVISION.value:
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Отправить текст",
-                        callback_data=f"send_text_{submission_id}"
-                    )
-                ]])
-                await message.answer(
-                    "❌ Нельзя отправить исправленный текст. Задание не находится на доработке.",
-                    reply_markup=keyboard
-                )
-                # Блокируем отправку и сохраняем данные
-                await state.set_data({
-                    'task_id': task_id,
-                    'submission_id': submission_id,
-                    'can_send_text': False,
-                    'is_blocked': True
-                })
-                return
-                
-            # Обновляем существующую публикацию
-            submission = await submission_service.update_submission_content(
-                submission_id=submission_id,
-                content=message.text,
-                photo=None  # Фото не меняем
-            )
-            action_text = "исправленный "
-            task_id = submission.task_id  # Используем task_id из публикации
+        if is_revision:
+            # Обновляем текст существующей публикации
+            logging.info(f"Обновление текста для публикации {submission_id}")
+            submission_service = SubmissionService(session)
+            submission = await submission_service.update_submission_content(submission_id, content=message.text)
+            
+            # После обновления получаем обновленную публикацию с данными задания
+            submission = await submission_service.get_submission_with_user(submission_id)
+            task_id = submission.task_id
+            
         else:
-            # Проверяем, нет ли уже публикации для этого задания
-            submissions = await submission_service.get_user_submissions(user.id, active_only=True)
-            existing_submission = next((s for s in submissions if s.task_id == task_id), None)
+            # Получаем ID задания из состояния
+            task_id = data.get('task_id')
             
-            if existing_submission:
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Отправить текст",
-                        callback_data="send_text"
-                    )
-                ]])
-                await message.answer(
-                    "❌ У вас уже есть текст для этого задания. Нельзя создать больше одного текста.",
-                    reply_markup=keyboard
-                )
-                # Блокируем отправку и сохраняем данные
-                await state.set_data({
-                    'task_id': task_id,
-                    'submission_id': submission_id,
-                    'can_send_text': False,
-                    'is_blocked': True
-                })
+            if not task_id:
+                logging.error(f"Не найден ID задания в состоянии для пользователя {user.username}")
+                await message.answer("Произошла ошибка: не найден ID задания")
+                await state.clear()
                 return
                 
-            # Создаем новую публикацию
-            if not task_id:
-                logging.error("task_id is missing when creating submission")
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Отправить текст",
-                        callback_data="send_text"
-                    )
-                ]])
-                await message.answer(
-                    "❌ Произошла ошибка при создании текста. Попробуйте снова.",
-                    reply_markup=keyboard
-                )
-                await state.set_data({
-                    'can_send_text': False,
-                    'is_blocked': True
-                })
-                return
-
-            # Проверяем существование задания
-            task_service = TaskService(session)
-            task = await task_service.get_task_by_id(task_id)
+            logging.info(f"Создание новой публикации для задания {task_id} от пользователя {user.username}")
             
-            if not task:
-                logging.error(f"Task {task_id} not found when creating submission")
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Отправить текст",
-                        callback_data="send_text"
-                    )
-                ]])
-                await message.answer(
-                    "❌ Задание не найдено. Попробуйте снова.",
-                    reply_markup=keyboard
-                )
-                await state.set_data({
-                    'can_send_text': False,
-                    'is_blocked': True
-                })
-                return
-
-            logging.info(f"Creating submission with task_id {task_id} for task {task}")
+            # Создаем публикацию
+            submission_service = SubmissionService(session)
             submission = await submission_service.create_submission(
                 task_id=task_id,
                 user_id=user.id,
-                content=message.text,
-                photo=None
+                content=message.text
             )
             
-            if not submission or not submission.task:
-                logging.error(f"Failed to create submission for task {task_id} or task not loaded")
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="Отправить текст",
-                        callback_data="send_text"
+        if submission:
+            # Получаем информацию о задании и его создателе
+            task_service = TaskService(session)
+            task = await task_service.get_task_by_id(task_id)
+            
+            # Уведомляем суперадминов
+            from src.config.users import ADMINS
+            for admin in ADMINS:
+                try:
+                    await bot.send_message(
+                        admin["telegram_id"],
+                        f"📨 {'Исправленный' if is_revision else 'Новый'} текст для задания #{submission.task_id}\n"
+                        f"От: {user.media_outlet}\n"
+                        f"Пользователь: @{user.username}\n\n"
+                        f"{message.text[:1000]}{'...' if len(message.text) > 1000 else ''}",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                            InlineKeyboardButton(
+                                text="Просмотреть",
+                                callback_data=f"review_submission_{submission.id}"
+                            )
+                        ]])
                     )
-                ]])
-                await message.answer(
-                    "❌ Не удалось создать текст. Попробуйте снова.",
-                    reply_markup=keyboard
-                )
-                await state.set_data({
-                    'task_id': task_id,
-                    'can_send_text': False,
-                    'is_blocked': True
-                })
-                return
+                except Exception as e:
+                    logging.error(f"Не удалось отправить уведомление администратору {admin['username']}: {e}")
+            
+            # НОВОЕ: Уведомляем создателя задания, если он не суперадмин
+            if task and task.created_by:
+                # Получаем пользователя-создателя
+                user_service = UserService(session)
+                creator = await user_service.get_user_by_id(task.created_by)
                 
-            action_text = "новый "
-        
-        # Уведомляем админов о тексте
-        from src.config.users import ADMINS
-        for admin in ADMINS:
-            try:
-                notification_text = (
-                    f"📨 {action_text}текст для задания #{submission.task_id}\n"
-                    f"От: {user.media_outlet}\n"
-                    f"ID пользователя: {user.telegram_id}\n"
-                    f"Имя пользователя: @{user.username}\n"
-                    f"Текст задания:\n{message.text}"
-                )
-                
-                keyboard = await get_moderation_keyboard(submission.id)
-                
-                await bot.send_message(
-                    admin["telegram_id"],
-                    notification_text,
-                    reply_markup=keyboard
-                )
-            except Exception as e:
-                logging.error(f"Не удалось отправить уведомление администратору {admin['username']} (ID: {admin['telegram_id']}): {e}")
-        
-        await message.answer(
-            f"✅ {action_text}текст успешно отправлен на проверку. Ожидайте одобрения.",
-            reply_markup=get_media_main_keyboard()
-        )
-        
-        # Полностью очищаем состояние после успешной отправки
-        await state.clear()
-        
+                # Проверяем, что создатель существует и не получил уведомление как суперадмин
+                if creator and creator.telegram_id:
+                    is_creator_superadmin = False
+                    for admin in ADMINS:
+                        if str(creator.telegram_id) == str(admin["telegram_id"]):
+                            is_creator_superadmin = True
+                            break
+                    
+                    if not is_creator_superadmin:
+                        try:
+                            logging.info(f"Отправка уведомления создателю задания {task.id}: {creator.telegram_id}")
+                            await bot.send_message(
+                                creator.telegram_id,
+                                f"📨 {'Исправленный' if is_revision else 'Новый'} текст для задания #{submission.task_id}\n"
+                                f"От: {user.media_outlet}\n"
+                                f"Пользователь: @{user.username}\n\n"
+                                f"{message.text[:1000]}{'...' if len(message.text) > 1000 else ''}",
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                                    InlineKeyboardButton(
+                                        text="Просмотреть",
+                                        callback_data=f"review_submission_{submission.id}"
+                                    )
+                                ]])
+                            )
+                        except Exception as e:
+                            logging.error(f"Не удалось отправить уведомление создателю задания (telegram_id: {creator.telegram_id}): {e}")
+            
+            await message.answer(f"✅ Текст для задания #{submission.task_id} успешно отправлен и ожидает проверки")
+        else:
+            await message.answer("❌ Не удалось создать публикацию. Пожалуйста, попробуйте позже или обратитесь к администратору.")
+            
+        await state.clear()  # Очищаем состояние
+            
     except Exception as e:
         logging.error(f"Error in handle_submission_text: {e}", exc_info=True)
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(
-                text="Отправить текст",
-                callback_data=f"send_text_{data.get('submission_id')}" if data.get('submission_id') else "send_text"
-            )
-        ]])
-        await message.answer(
-            "❌ Произошла ошибка при отправке текста. Попробуйте снова.",
-            reply_markup=keyboard
-        )
-        # Блокируем отправку и сохраняем данные
-        await state.set_data({
-            'task_id': data.get('task_id'),
-            'submission_id': data.get('submission_id'),
-            'can_send_text': False,
-            'is_blocked': True
-        })
+        await message.answer("❌ Произошла ошибка при обработке текста. Пожалуйста, попробуйте позже или обратитесь к администратору.")
+        await state.clear()  # Очищаем состояние при ошибке
 
 @router.callback_query(F.data.startswith("approve_submission_"))
 async def approve_submission(callback: CallbackQuery, session: AsyncSession, bot: Bot):
@@ -645,126 +519,110 @@ async def handle_photo_submission(
     bot: Bot
 ):
     try:
-        data = await state.get_data()
-        
-        # Если отправка заблокирована или не было нажатия кнопки
-        if data.get('is_blocked') or not data.get('can_send_photo', False):
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="📎 Отправить фото",
-                    callback_data="send_photo"
-                )
-            ]])
-            await message.answer(
-                "❌ Для отправки фото нажмите кнопку ниже:",
-                reply_markup=keyboard
-            )
+        # Проверяем, что есть фото
+        if not message.photo:
+            await message.answer("❌ Пожалуйста, отправьте фотографию")
             return
             
-        if not message.photo:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="📎 Отправить фото",
-                    callback_data="send_photo"
-                )
-            ]])
-            await message.answer(
-                "❌ Пожалуйста, отправьте фото, а не другой тип сообщения.",
-                reply_markup=keyboard
-            )
-            return
-
+        data = await state.get_data()
         submission_id = data.get('submission_id')
         
         if not submission_id:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="📎 Отправить фото",
-                    callback_data="send_photo"
-                )
-            ]])
-            await message.answer(
-                "❌ Произошла ошибка. Попробуйте снова.",
-                reply_markup=keyboard
-            )
+            await message.answer("❌ Не удалось найти задание")
             await state.clear()
             return
-        
-        # Проверяем статус публикации перед обновлением
+            
         submission_service = SubmissionService(session)
-        submission = await submission_service.get_submission(submission_id)
         
-        # Разрешаем отправку фото если:
-        # 1. Публикация на доработке (REVISION)
-        # 2. Текст уже одобрен (TEXT_APPROVED)
-        if not submission or (
-            submission.status != SubmissionStatus.REVISION.value and 
-            submission.status != SubmissionStatus.TEXT_APPROVED.value
-        ):
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="📎 Отправить фото",
-                    callback_data="send_photo"
-                )
-            ]])
-            await message.answer(
-                "❌ Нельзя отправить фото. Дождитесь одобрения текста или отправки на доработку.",
-                reply_markup=keyboard
-            )
+        # Получаем публикацию для проверки статуса
+        submission = await submission_service.get_submission_with_user(submission_id)
+        if not submission:
+            await message.answer("❌ Задание не найдено")
             await state.clear()
             return
-
-        # Получаем файл_id самой большой версии фото
-        photo = message.photo[-1].file_id
-        
-        # Обновляем публикацию
-        submission = await submission_service.update_submission_content(
-            submission_id=submission_id,
-            photo=photo
-        )
-        
-        # Получаем обновленную публикацию с данными пользователя
-        submission = await submission_service.get_submission_with_user(submission_id)
-        
-        # Подготавливаем превью текста (первые 300 символов)
-        text_preview = submission.content[:300]
-        if len(submission.content) > 300:
-            text_preview += "..."
-        
-        # Уведомляем админов о новом фото
-        from src.config.users import ADMINS
-        for admin in ADMINS:
-            try:
-                await bot.send_photo(
-                    chat_id=admin["telegram_id"],
-                    photo=photo,
-                    caption=(
-                        f"📸 {'Исправленное' if submission.status == SubmissionStatus.REVISION.value else 'Новое'} фото для задания #{submission.task_id}\n"
+            
+        # Обновляем фото публикации
+        try:
+            # Берем самую крупную версию фото
+            photo = message.photo[-1].file_id
+            submission = await submission_service.update_submission_content(
+                submission_id=submission_id,
+                photo=photo
+            )
+        except ValueError as e:
+            await message.answer(f"❌ Ошибка: {str(e)}")
+            await state.clear()
+            return
+            
+        if submission:
+            # Получаем информацию о задании и его создателе
+            task_service = TaskService(session)
+            task = await task_service.get_task_by_id(submission.task_id)
+            
+            # Определяем, является ли это исправленным фото
+            is_revision = submission.status == SubmissionStatus.REVISION.value
+            
+            # Уведомляем суперадминов
+            from src.config.users import ADMINS
+            for admin in ADMINS:
+                try:
+                    # Отправляем фото с текстом
+                    caption = (
+                        f"📸 {'Исправленное' if is_revision else 'Новое'} фото для задания #{submission.task_id}\n"
                         f"От: {submission.user.media_outlet}\n"
-                        f"ID пользователя: {submission.user.telegram_id}\n"
-                        f"Имя пользователя: @{submission.user.username}\n\n"
-                        f"Текст задания:\n{text_preview}"
-                    ),
-                    reply_markup=await get_moderation_keyboard(submission.id)
-                )
-            except Exception as e:
-                logging.error(f"Не удалось отправить уведомление администратору {admin['username']} (ID: {admin['telegram_id']}): {e}")
-        
-        # Отправляем уведомление пользователю
-        await send_user_notification(bot, submission)
-        
-        await message.answer(
-            "✅ Фото успешно добавлено к заданию. Ожидайте одобрения.",
-            reply_markup=get_media_main_keyboard()
-        )
+                        f"Пользователь: @{submission.user.username}"
+                    )
+                    await bot.send_photo(
+                        admin["telegram_id"],
+                        photo=photo,
+                        caption=caption,
+                        reply_markup=await get_moderation_keyboard(submission.id)
+                    )
+                except Exception as e:
+                    logging.error(f"Не удалось отправить уведомление администратору {admin['username']}: {e}")
+            
+            # НОВОЕ: Уведомляем создателя задания, если он не суперадмин
+            if task and task.created_by:
+                # Получаем пользователя-создателя
+                user_service = UserService(session)
+                creator = await user_service.get_user_by_id(task.created_by)
+                
+                # Проверяем, что создатель существует и не получил уведомление как суперадмин
+                if creator and creator.telegram_id:
+                    is_creator_superadmin = False
+                    for admin in ADMINS:
+                        if str(creator.telegram_id) == str(admin["telegram_id"]):
+                            is_creator_superadmin = True
+                            break
+                    
+                    if not is_creator_superadmin:
+                        try:
+                            logging.info(f"Отправка уведомления о фото создателю задания {task.id}: {creator.telegram_id}")
+                            caption = (
+                                f"📸 {'Исправленное' if is_revision else 'Новое'} фото для задания #{submission.task_id}\n"
+                                f"От: {submission.user.media_outlet}\n"
+                                f"Пользователь: @{submission.user.username}"
+                            )
+                            await bot.send_photo(
+                                creator.telegram_id,
+                                photo=photo,
+                                caption=caption,
+                                reply_markup=await get_moderation_keyboard(submission.id)
+                            )
+                        except Exception as e:
+                            logging.error(f"Не удалось отправить уведомление о фото создателю задания (telegram_id: {creator.telegram_id}): {e}")
+            
+            # Отправляем только уведомление через send_user_notification
+            await send_user_notification(bot, submission)
+            
+            # Отправляем пользователю ответ
+            await message.answer("✅ Фото успешно добавлено к заданию и ожидает проверки")
+            
         await state.clear()
         
     except Exception as e:
         logging.error(f"Error in handle_photo_submission: {e}", exc_info=True)
-        await message.answer(
-            "❌ Произошла ошибка при сохранении фото",
-            reply_markup=get_media_main_keyboard()
-        )
+        await message.answer("❌ Произошла ошибка при обработке фото. Пожалуйста, попробуйте позже или обратитесь к администратору.")
         await state.clear()
 
 @router.callback_query(F.data == "show_archive")
@@ -1002,16 +860,51 @@ async def handle_link_submission(
         
         # Уведомляем админов
         from src.config.users import ADMINS
+        
+        # Получаем задание, чтобы узнать его создателя
+        task_service = TaskService(session)
+        task = await task_service.get_task_by_id(submission.task_id)
+        
+        # Готовим текст уведомления
+        notification_text = (
+            f"ℹ️ Информация о задании\n"
+            f"Пользователь @{message.from_user.username} отправил ссылку на задание #{submission.task_id}:\n"
+            f"{message.text}"
+        )
+        
+        # Список администраторов, которые получили уведомление
+        notified_admins = set()
+        
+        # Уведомляем суперадминов
         for admin in ADMINS:
             try:
                 await bot.send_message(
                     admin["telegram_id"],
-                    f"ℹ️ Информация о задании\n"
-                    f"Пользователь @{message.from_user.username} отправил ссылку на задание #{submission.task_id}:\n"
-                    f"{message.text}"
+                    notification_text
                 )
+                notified_admins.add(admin["telegram_id"])
             except Exception as e:
                 logging.error(f"Не удалось отправить уведомление администратору {admin['username']}: {e}")
+        
+        # Если задание найдено и есть создатель, уведомляем его
+        if task and task.created_by:
+            # Проверяем, не является ли создатель суперадмином
+            creator_is_superadmin = False
+            for admin in ADMINS:
+                if int(admin["telegram_id"]) == int(task.created_by):
+                    creator_is_superadmin = True
+                    break
+            
+            # Если создатель не суперадмин и ещё не получил уведомление
+            if not creator_is_superadmin and int(task.created_by) not in notified_admins:
+                try:
+                    await bot.send_message(
+                        task.created_by,
+                        notification_text
+                    )
+                    logging.info(f"Уведомление о ссылке отправлено создателю задания #{submission.task_id} (ID: {task.created_by})")
+                except Exception as e:
+                    logging.error(f"Не удалось отправить уведомление создателю задания {task.created_by}: {e}")
         
         await message.answer(
             "✅ Ссылка успешно добавлена. Спасибо!",
@@ -1314,18 +1207,53 @@ async def handle_revision_comment(
         
         # Уведомляем админов
         from src.config.users import ADMINS
+        
+        # Получаем задание, чтобы узнать его создателя
+        task_service = TaskService(session)
+        task = await task_service.get_task_by_id(submission.task_id)
+        
+        # Готовим текст уведомления
+        notification_text = (
+            f"📨 Добавлен комментарий к заданию #{submission.task_id}\n"
+            f"От: {submission.user.media_outlet}\n"
+            f"ID пользователя: {submission.user.telegram_id}\n"
+            f"Имя пользователя: @{submission.user.username}\n\n"
+            f"Комментарий:\n{message.text}"
+        )
+        
+        # Список администраторов, которые получили уведомление
+        notified_admins = set()
+        
+        # Уведомляем суперадминов
         for admin in ADMINS:
             try:
                 await bot.send_message(
                     admin["telegram_id"],
-                    f"📨 Добавлен комментарий к заданию #{submission.task_id}\n"
-                    f"От: {submission.user.media_outlet}\n"
-                    f"ID пользователя: {submission.user.telegram_id}\n"
-                    f"Имя пользователя: @{submission.user.username}\n\n"
-                    f"Комментарий:\n{message.text}"
+                    notification_text
                 )
+                notified_admins.add(admin["telegram_id"])
             except Exception as e:
                 logging.error(f"Не удалось отправить уведомление администратору {admin['username']}: {e}")
+        
+        # Если задание найдено и есть создатель, уведомляем его
+        if task and task.created_by:
+            # Проверяем, не является ли создатель суперадмином
+            creator_is_superadmin = False
+            for admin in ADMINS:
+                if int(admin["telegram_id"]) == int(task.created_by):
+                    creator_is_superadmin = True
+                    break
+            
+            # Если создатель не суперадмин и ещё не получил уведомление
+            if not creator_is_superadmin and int(task.created_by) not in notified_admins:
+                try:
+                    await bot.send_message(
+                        task.created_by,
+                        notification_text
+                    )
+                    logging.info(f"Уведомление о комментарии отправлено создателю задания #{submission.task_id} (ID: {task.created_by})")
+                except Exception as e:
+                    logging.error(f"Не удалось отправить уведомление создателю задания {task.created_by}: {e}")
         
         await message.answer(
             "✅ Комментарий успешно добавлен. Спасибо!",

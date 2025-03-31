@@ -170,46 +170,100 @@ async def handle_deadline(
 
 @router.callback_query(F.data == "review_posts")
 async def review_posts(callback: CallbackQuery, session: AsyncSession, user: User):
-    if not await check_admin(user):
-        await callback.answer("У вас нет прав администратора", show_alert=True)
-        return
-
-    submission_service = SubmissionService(session)
-    submissions = await submission_service.get_pending_submissions(
-        admin_id=user.id,
-        is_superadmin=bool(user.is_superadmin)
-    )
+    logging.info(f"Вызов функции review_posts пользователем {user.telegram_id}")
+    try:
+        if not await check_admin(user):
+            logging.warning(f"Пользователь {user.telegram_id} не является администратором")
+            await callback.answer("У вас нет прав администратора", show_alert=True)
+            return
     
-    if not submissions:
-        await callback.message.answer("Нет публикаций на модерацию")
-        return
-    
-    for submission in submissions:
-        # Формируем текст с полной информацией
-        text = (
-            f"[NEW] Задание #{submission.task_id}\n"
-            f"От: {submission.user.media_outlet}\n"
-            f"ID пользователя: {submission.user.telegram_id}\n"
-            f"Имя пользователя: @{submission.user.username}\n"
-            f"Создатель задания: {submission.task.created_by}\n"  # Добавляем информацию о создателе
-            f"Текст задания:\n{submission.content}\n"
-            f"Дата отправки: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}"
+        await callback.answer("Загружаю задания...", show_alert=False)
+        submission_service = SubmissionService(session)
+        
+        logging.info(f"Получение публикаций на модерацию для admin_id={user.id}, is_superadmin={bool(user.is_superadmin)}")
+        submissions = await submission_service.get_pending_submissions(
+            admin_id=user.id,
+            is_superadmin=bool(user.is_superadmin)
         )
         
-        # Если есть фото, отправляем его с текстом
-        if submission.photo:
-            await callback.message.answer_photo(
-                photo=submission.photo,
-                caption=text,
-                reply_markup=await get_moderation_keyboard(submission.id, session)
+        logging.info(f"Получено {len(submissions)} публикаций на модерацию")
+        
+        if not submissions:
+            logging.info("Нет публикаций на модерацию")
+            await callback.message.answer("Нет публикаций на модерацию")
+            return
+        
+        for submission in submissions:
+            logging.info(f"Формирование сообщения для задания {submission.id}")
+            # Формируем текст с полной информацией
+            text = (
+                f"[NEW] Задание #{submission.task_id}\n"
+                f"От: {submission.user.media_outlet}\n"
+                f"ID пользователя: {submission.user.telegram_id}\n"
+                f"Имя пользователя: @{submission.user.username}\n"
+                f"Создатель задания: {submission.task.created_by}\n"  # Добавляем информацию о создателе
+                f"Текст задания:\n{submission.content}\n"
+                f"Дата отправки: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}"
             )
-        else:
-            await callback.message.answer(
-                text,
-                reply_markup=await get_moderation_keyboard(submission.id, session)
-            )
-    
-    await callback.answer()
+            
+            try:
+                # Если есть фото, отправляем его с текстом
+                if submission.photo:
+                    logging.info(f"Отправка фото для задания {submission.id}")
+                    
+                    # Ограничиваем длину подписи до 850 символов
+                    caption = text
+                    if len(caption) > 850:
+                        caption = caption[:847] + "..."
+                        logging.info(f"Обрезана подпись к фото для задания {submission.id} до 850 символов")
+                    
+                    await callback.message.answer_photo(
+                        photo=submission.photo,
+                        caption=caption,
+                        reply_markup=await get_moderation_keyboard(submission.id)
+                    )
+                else:
+                    logging.info(f"Отправка текста для задания {submission.id}")
+                    
+                    # Ограничиваем длину текста до 4000 символов (максимальный размер сообщения в Telegram)
+                    message_text = text
+                    if len(message_text) > 4000:
+                        message_text = message_text[:3997] + "..."
+                        logging.info(f"Обрезан текст для задания {submission.id} до 4000 символов")
+                    
+                    await callback.message.answer(
+                        message_text,
+                        reply_markup=await get_moderation_keyboard(submission.id)
+                    )
+            except Exception as e:
+                logging.error(f"Ошибка при отправке сообщения для задания {submission.id}: {e}", exc_info=True)
+                # Пробуем отправить короткую версию при ошибке
+                try:
+                    short_text = (
+                        f"[NEW] Задание #{submission.task_id}\n"
+                        f"От: {submission.user.media_outlet}\n"
+                        f"Имя пользователя: @{submission.user.username}\n"
+                        f"(Текст задания слишком длинный и был обрезан)"
+                    )
+                    
+                    if submission.photo:
+                        await callback.message.answer_photo(
+                            photo=submission.photo,
+                            caption=short_text[:850],
+                            reply_markup=await get_moderation_keyboard(submission.id)
+                        )
+                    else:
+                        await callback.message.answer(
+                            short_text,
+                            reply_markup=await get_moderation_keyboard(submission.id)
+                        )
+                except Exception as nested_e:
+                    logging.error(f"Вторичная ошибка при отправке сообщения: {nested_e}", exc_info=True)
+        
+    except Exception as e:
+        logging.error(f"Ошибка в функции review_posts: {e}", exc_info=True)
+        await callback.message.answer("Произошла ошибка при получении заданий на модерацию")
+        await callback.answer("Произошла ошибка", show_alert=True)
 
 @router.callback_query(F.data.startswith("approve_submission_"))
 async def approve_submission(callback: CallbackQuery, session: AsyncSession, user: User, bot: Bot):
@@ -410,44 +464,98 @@ async def cmd_create(message: Message, state: FSMContext, user: User):
 
 @router.message(Command("review"))
 async def cmd_review(message: Message, session: AsyncSession, user: User):
-    if not await check_admin(user):
-        await message.answer("У вас нет прав администратора")
-        return
-
-    submission_service = SubmissionService(session)
-    submissions = await submission_service.get_pending_submissions(
-        admin_id=user.id,
-        is_superadmin=bool(user.is_superadmin)
-    )
+    logging.info(f"Вызов команды /review пользователем {user.telegram_id}")
+    try:
+        if not await check_admin(user):
+            logging.warning(f"Пользователь {user.telegram_id} не является администратором")
+            await message.answer("У вас нет прав администратора")
+            return
     
-    if not submissions:
-        await message.answer("Нет публикаций на модерацию")
-        return
-    
-    for submission in submissions:
-        # Формируем текст с полной информацией
-        text = (
-            f"📨 Задание #{submission.task_id}\n"
-            f"От: {submission.user.media_outlet}\n"
-            f"ID пользователя: {submission.user.telegram_id}\n"
-            f"Имя пользователя: @{submission.user.username}\n"
-            f"Создатель задания: {submission.task.created_by}\n"  # Добавляем информацию о создателе
-            f"Текст задания:\n{submission.content}\n"
-            f"Дата отправки: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}"
+        await message.answer("Загружаю задания на модерацию...")
+        
+        submission_service = SubmissionService(session)
+        submissions = await submission_service.get_pending_submissions(
+            admin_id=user.id,
+            is_superadmin=bool(user.is_superadmin)
         )
         
-        # Если есть фото, отправляем его с текстом
-        if submission.photo:
-            await message.answer_photo(
-                photo=submission.photo,
-                caption=text,
-                reply_markup=await get_moderation_keyboard(submission.id, session)
+        logging.info(f"Получено {len(submissions)} заданий на модерацию")
+        
+        if not submissions:
+            logging.info("Нет заданий на модерацию")
+            await message.answer("Нет заданий на модерацию")
+            return
+        
+        for submission in submissions:
+            logging.info(f"Формирование сообщения для задания {submission.id}")
+            # Формируем текст с полной информацией
+            text = (
+                f"📨 Задание #{submission.task_id}\n"
+                f"От: {submission.user.media_outlet}\n"
+                f"ID пользователя: {submission.user.telegram_id}\n"
+                f"Имя пользователя: @{submission.user.username}\n"
+                f"Создатель задания: {submission.task.created_by}\n"  # Добавляем информацию о создателе
+                f"Текст задания:\n{submission.content}\n"
+                f"Дата отправки: {submission.submitted_at.strftime('%d.%m.%Y %H:%M')}"
             )
-        else:
-            await message.answer(
-                text,
-                reply_markup=await get_moderation_keyboard(submission.id, session)
-            )
+            
+            try:
+                # Если есть фото, отправляем его с текстом
+                if submission.photo:
+                    logging.info(f"Отправка фото для задания {submission.id}")
+                    
+                    # Ограничиваем длину подписи до 850 символов
+                    caption = text
+                    if len(caption) > 850:
+                        caption = caption[:847] + "..."
+                        logging.info(f"Обрезана подпись к фото для задания {submission.id} до 850 символов")
+                    
+                    await message.answer_photo(
+                        photo=submission.photo,
+                        caption=caption,
+                        reply_markup=await get_moderation_keyboard(submission.id)
+                    )
+                else:
+                    logging.info(f"Отправка текста для задания {submission.id}")
+                    
+                    # Ограничиваем длину текста до 4000 символов (максимальный размер сообщения в Telegram)
+                    message_text = text
+                    if len(message_text) > 4000:
+                        message_text = message_text[:3997] + "..."
+                        logging.info(f"Обрезан текст для задания {submission.id} до 4000 символов")
+                    
+                    await message.answer(
+                        message_text,
+                        reply_markup=await get_moderation_keyboard(submission.id)
+                    )
+            except Exception as e:
+                logging.error(f"Ошибка при отправке сообщения для задания {submission.id}: {e}", exc_info=True)
+                # Пробуем отправить короткую версию при ошибке
+                try:
+                    short_text = (
+                        f"📨 Задание #{submission.task_id}\n"
+                        f"От: {submission.user.media_outlet}\n"
+                        f"Имя пользователя: @{submission.user.username}\n"
+                        f"(Текст задания слишком длинный и был обрезан)"
+                    )
+                    
+                    if submission.photo:
+                        await message.answer_photo(
+                            photo=submission.photo,
+                            caption=short_text[:850],
+                            reply_markup=await get_moderation_keyboard(submission.id)
+                        )
+                    else:
+                        await message.answer(
+                            short_text,
+                            reply_markup=await get_moderation_keyboard(submission.id)
+                        )
+                except Exception as nested_e:
+                    logging.error(f"Вторичная ошибка при отправке сообщения: {nested_e}", exc_info=True)
+                    
+    except Exception as e:
+        logging.error(f"Ошибка в функции cmd_review: {e}", exc_info=True)
+        await message.answer("Произошла ошибка при получении заданий на модерацию")
 
 @router.message(Command("export"))
 async def cmd_export(message: Message, session: AsyncSession, user: User):
@@ -491,6 +599,7 @@ async def handle_admin_command(message: Message, user: User, state: FSMContext):
 @router.callback_query(F.data.startswith("review_submission_"))
 async def review_submission(callback: CallbackQuery, session: AsyncSession):
     submission_id = int(callback.data.split("_")[-1])
+    logging.info(f"Запрос просмотра задания {submission_id}")
     submission_service = SubmissionService(session)
     submission = await submission_service.get_submission_with_user(submission_id)
 
@@ -505,11 +614,37 @@ async def review_submission(callback: CallbackQuery, session: AsyncSession):
         f"Текст задания:\n{submission.content}"
     )
 
-    await callback.message.answer(
-        text,
-        reply_markup=await get_moderation_keyboard(submission.id, session)
-    )
-    await callback.answer()
+    try:
+        # Ограничиваем длину текста до 4000 символов
+        message_text = text
+        if len(message_text) > 4000:
+            message_text = message_text[:3997] + "..."
+            logging.info(f"Обрезан текст для задания {submission.id} до 4000 символов")
+        
+        await callback.message.answer(
+            message_text,
+            reply_markup=await get_moderation_keyboard(submission.id)
+        )
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"Ошибка при отправке деталей задания {submission_id}: {e}", exc_info=True)
+        
+        # Пробуем отправить короткую версию при ошибке
+        try:
+            short_text = (
+                f"[NEW] Задание #{submission.task_id}\n"
+                f"От: {submission.user.media_outlet}\n"
+                f"(Текст задания слишком длинный и был обрезан)"
+            )
+            
+            await callback.message.answer(
+                short_text,
+                reply_markup=await get_moderation_keyboard(submission.id)
+            )
+        except Exception as nested_e:
+            logging.error(f"Вторичная ошибка при отправке сообщения: {nested_e}", exc_info=True)
+            
+        await callback.answer("Произошла ошибка при отображении деталей задания", show_alert=True)
 
 @router.callback_query(F.data.startswith("send_link_"))
 async def handle_send_link(callback: CallbackQuery, state: FSMContext):
@@ -662,21 +797,6 @@ async def list_tasks_for_deletion(
             )
     
     await callback.answer()
-
-async def get_moderation_keyboard(submission_id: int, session: AsyncSession) -> InlineKeyboardMarkup:
-    """Создает клавиатуру для модерации задания"""
-    submission_service = SubmissionService(session)
-    submission = await submission_service.get_submission(submission_id)
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve_submission_{submission_id}"),
-            InlineKeyboardButton(
-                text="📝 На доработку", 
-                callback_data=f"request_revision_{submission_id}",
-                disabled=submission.status == "approved"
-            )
-        ]
-    ])
 
 def get_admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[

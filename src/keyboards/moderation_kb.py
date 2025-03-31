@@ -1,8 +1,10 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from src.database.models.submission import SubmissionStatus
+import logging
 
 async def get_moderation_keyboard(submission_id: int) -> InlineKeyboardMarkup:
     """Возвращает клавиатуру для модерации публикации"""
+    logging.info(f"Создание клавиатуры модерации для submission_id={submission_id}")
     buttons = []
     
     # Кнопка одобрения
@@ -29,4 +31,7 @@ async def get_moderation_keyboard(submission_id: int) -> InlineKeyboardMarkup:
         )
     )
     
-    return InlineKeyboardMarkup(inline_keyboard=[buttons]) 
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+    # Используем безопасное логирование без вывода эмодзи
+    logging.info(f"Клавиатура модерации создана для submission_id={submission_id}")
+    return keyboard 
