@@ -12,6 +12,12 @@ class UserService:
         result = await self.session.execute(query)
         return result.scalar_one_or_none()
 
+    async def get_user_by_id(self, user_id: int) -> Optional[User]:
+        """Получает пользователя по его внутреннему ID в базе данных"""
+        query = select(User).where(User.id == user_id)
+        result = await self.session.execute(query)
+        return result.scalar_one_or_none()
+
     async def get_all_media_outlets(self) -> List[User]:
         query = select(User).where(User.is_admin == False)
         result = await self.session.execute(query)
