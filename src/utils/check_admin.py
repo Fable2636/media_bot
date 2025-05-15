@@ -12,6 +12,19 @@ async def check_admin(user: User) -> bool:
         bool: True если пользователь администратор или суперадмин, False в противном случае
     """
     try:
+        # Проверяем, существует ли пользователь
+        if not user:
+            logging.error("check_admin: user объект отсутствует (None)")
+            return False
+            
+        # Логируем подробную информацию о пользователе
+        logging.info(f"check_admin подробная информация о пользователе:")
+        logging.info(f"  ID в БД: {user.id}")
+        logging.info(f"  telegram_id: {user.telegram_id} (тип: {type(user.telegram_id)})")
+        logging.info(f"  username: {user.username}")
+        logging.info(f"  is_admin значение: {user.is_admin} (тип: {type(user.is_admin)})")
+        logging.info(f"  is_superadmin значение: {user.is_superadmin} (тип: {type(user.is_superadmin)})")
+        
         # Проверяем флаги в базе данных
         is_admin = bool(user.is_admin)
         is_superadmin = bool(user.is_superadmin)

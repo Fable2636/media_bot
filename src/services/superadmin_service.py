@@ -1,5 +1,5 @@
 from typing import List, Optional
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, update, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.models import User
 import logging
@@ -16,7 +16,16 @@ class SuperadminService:
             
             if user:
                 # Если пользователь существует, делаем его админом
-                user.is_admin = True
+                user.is_admin = True  # Явно устанавливаем Python bool True
+                logging.info(f"Обновляем существующего пользователя: {user.username} (ID: {user.telegram_id})")
+                logging.info(f"  Установлено is_admin={user.is_admin} (тип: {type(user.is_admin)})")
+                
+                # Дополнительно обновляем через SQL для решения проблем с SQLAlchemy/SQLite
+                await self.session.execute(
+                    text("UPDATE users SET is_admin = 1 WHERE telegram_id = :telegram_id"),
+                    {"telegram_id": telegram_id}
+                )
+                
                 user.username = username
                 user.media_outlet = None
             else:
@@ -28,10 +37,18 @@ class SuperadminService:
                     is_superadmin=False,
                     media_outlet=None
                 )
+                logging.info(f"Создаем нового админа: {username} (ID: {telegram_id})")
+                logging.info(f"  Установлено is_admin={user.is_admin} (тип: {type(user.is_admin)})")
+                
                 self.session.add(user)
             
             await self.session.commit()
             await self.session.refresh(user)
+            
+            # Проверяем результат
+            logging.info(f"После сохранения в БД: {user.username} (ID: {user.telegram_id})")
+            logging.info(f"  Значение is_admin={user.is_admin} (тип: {type(user.is_admin)})")
+            
             return user
             
         except Exception as e:

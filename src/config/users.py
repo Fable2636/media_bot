@@ -40,11 +40,6 @@ ADMINS = [
 # Представители СМИ
 MEDIA_OUTLETS = [
     {
-        "telegram_id": 157648462,  # Ваш ID
-        "username": "@Kolesnikov15",
-        "media_outlet": "Первый канал"
-    },
-    {
         "telegram_id": 401400389,
         "username": "Fable0309",
         "media_outlet": "Первый канал"  # Тот же канал

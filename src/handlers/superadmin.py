@@ -80,6 +80,17 @@ async def add_admin_username(message: Message, state: FSMContext, session: Async
     service = SuperadminService(session)
     try:
         admin = await service.add_admin(admin_id, username)
+        # Проверим, что is_admin установлен корректно
+        logging.info(f"Проверка созданного админа: id={admin.id}, telegram_id={admin.telegram_id}, "
+                   f"username={admin.username}, is_admin={admin.is_admin} (тип: {type(admin.is_admin)})")
+                   
+        # Если is_admin не имеет значение True, корректируем это
+        if admin.is_admin is not True:
+            logging.warning(f"Обнаружено некорректное значение is_admin={admin.is_admin}, "
+                          f"устанавливаем явный True")
+            admin.is_admin = True
+            await session.commit()
+            
         await message.answer(f"✅ Администратор успешно добавлен:\nID: {admin.telegram_id}\nUsername: {admin.username}")
     except Exception as e:
         await message.answer(f"❌ Ошибка при добавлении администратора: {str(e)}")
