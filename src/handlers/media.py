@@ -443,6 +443,45 @@ async def approve_submission(callback: CallbackQuery, session: AsyncSession, bot
             except Exception as e:
                 logging.error(f"Error updating admin message: {e}")
 
+        # Если статус задания стал APPROVED (т.е. одобрено фото), отправляем уведомление создателю задания
+        if submission.status == SubmissionStatus.APPROVED.value:
+            # Генерируем текст уведомления
+            notification_text = (
+                f"✅ Информация о задании\n"
+                f"Публикация для задания #{submission.task_id} от пользователя @{submission.user.username} полностью одобрена\n"
+                f"Ожидается отправка ссылки на публикацию."
+            )
+            
+            # Получаем всех администраторов из базы данных
+            user_service = UserService(session)
+            all_admins = await user_service.get_all_admins()
+            logging.info(f"Найдено {len(all_admins)} администраторов в базе данных")
+            
+            # Отправляем уведомления всем администраторам
+            notified_count = 0
+            for admin in all_admins:
+                try:
+                    if admin.telegram_id:
+                        try:
+                            # Преобразуем telegram_id к int
+                            admin_telegram_id = int(admin.telegram_id)
+                            
+                            # Отправляем уведомление
+                            await bot.send_message(
+                                admin_telegram_id,
+                                notification_text
+                            )
+                            notified_count += 1
+                            logging.info(f"✅ Уведомление отправлено администратору {admin.username} (ID: {admin_telegram_id})")
+                        except (ValueError, TypeError) as e:
+                            logging.error(f"❌ Ошибка преобразования telegram_id для {admin.username}: {e}")
+                    else:
+                        logging.warning(f"⚠️ У администратора {admin.username} отсутствует telegram_id")
+                except Exception as e:
+                    logging.error(f"Не удалось отправить уведомление администратору {admin.username}: {e}")
+            
+            logging.info(f"📊 Отправлено уведомлений {notified_count} администраторам из {len(all_admins)}")
+
         # Отправляем только уведомление через send_user_notification
         await send_user_notification(bot, submission)
         
@@ -562,60 +601,48 @@ async def handle_photo_submission(
             # Определяем, является ли это исправленным фото
             is_revision = submission.status == SubmissionStatus.REVISION.value
             
-            # Уведомляем суперадминов
-            from src.config.users import ADMINS
-            for admin in ADMINS:
-                try:
-                    # Отправляем фото с текстом
-                    caption = (
-                        f"📸 {'Исправленное' if is_revision else 'Новое'} фото для задания #{submission.task_id}\n"
-                        f"От: {submission.user.media_outlet}\n"
-                        f"Пользователь: @{submission.user.username}"
-                    )
-                    await bot.send_photo(
-                        admin["telegram_id"],
-                        photo=photo,
-                        caption=caption,
-                        reply_markup=await get_moderation_keyboard(submission.id)
-                    )
-                except Exception as e:
-                    logging.error(f"Не удалось отправить уведомление администратору {admin['username']}: {e}")
+            # Готовим текст для уведомления
+            caption = (
+                f"📸 {'Исправленное' if is_revision else 'Новое'} фото для задания #{submission.task_id}\n"
+                f"От: {submission.user.media_outlet}\n"
+                f"Пользователь: @{submission.user.username}"
+            )
             
-            # НОВОЕ: Уведомляем создателя задания, если он не суперадмин
-            if task and task.created_by:
-                # Получаем пользователя-создателя
-                user_service = UserService(session)
-                creator = await user_service.get_user_by_id(task.created_by)
-                
-                # Проверяем, что создатель существует и не получил уведомление как суперадмин
-                if creator and creator.telegram_id:
-                    is_creator_superadmin = False
-                    for admin in ADMINS:
-                        if str(creator.telegram_id) == str(admin["telegram_id"]):
-                            is_creator_superadmin = True
-                            break
-                    
-                    if not is_creator_superadmin:
+            # Получаем всех администраторов из базы данных
+            user_service = UserService(session)
+            all_admins = await user_service.get_all_admins()
+            logging.info(f"Найдено {len(all_admins)} администраторов в базе данных")
+            
+            # Отправляем уведомления всем администраторам
+            notified_count = 0
+            for admin in all_admins:
+                try:
+                    if admin.telegram_id:
                         try:
-                            logging.info(f"Отправка уведомления о фото создателю задания {task.id}: {creator.telegram_id}")
-                            caption = (
-                                f"📸 {'Исправленное' if is_revision else 'Новое'} фото для задания #{submission.task_id}\n"
-                                f"От: {submission.user.media_outlet}\n"
-                                f"Пользователь: @{submission.user.username}"
-                            )
+                            # Преобразуем telegram_id к int
+                            admin_telegram_id = int(admin.telegram_id)
+                            
+                            # Отправляем фото с подписью
                             await bot.send_photo(
-                                creator.telegram_id,
+                                admin_telegram_id,
                                 photo=photo,
                                 caption=caption,
                                 reply_markup=await get_moderation_keyboard(submission.id)
                             )
-                        except Exception as e:
-                            logging.error(f"Не удалось отправить уведомление о фото создателю задания (telegram_id: {creator.telegram_id}): {e}")
+                            notified_count += 1
+                            logging.info(f"✅ Фото отправлено администратору {admin.username} (ID: {admin_telegram_id})")
+                        except (ValueError, TypeError) as e:
+                            logging.error(f"❌ Ошибка преобразования telegram_id для {admin.username}: {e}")
+                    else:
+                        logging.warning(f"⚠️ У администратора {admin.username} отсутствует telegram_id")
+                except Exception as e:
+                    logging.error(f"Не удалось отправить фото администратору {admin.username}: {e}")
             
-            # Отправляем только уведомление через send_user_notification
+            logging.info(f"📊 Отправлено фото {notified_count} администраторам из {len(all_admins)}")
+            
+            # Отправляем уведомление пользователю через send_user_notification
             await send_user_notification(bot, submission)
             
-            # Отправляем пользователю ответ
             await message.answer("✅ Фото успешно добавлено к заданию и ожидает проверки")
             
         await state.clear()
@@ -870,102 +897,57 @@ async def handle_link_submission(
             f"{message.text}"
         )
         
-        # Словарь ID пользователей, которые уже получили уведомление
-        # Используем telegram_id в качестве ключей
+        # Получаем ТОЛЬКО суперадминов из базы данных
+        user_service = UserService(session)
+        superadmins = await user_service.get_superadmins()
+        logging.info(f"Найдено {len(superadmins)} суперадминов в базе данных")
+        
+        # Множество для отслеживания уже уведомленных пользователей
         notified_user_telegrams = set()
         
-        # Получаем всех администраторов из базы данных
-        user_service = UserService(session)
-        all_admins = await user_service.get_all_admins()
-        logging.info(f"Найдено {len(all_admins)} администраторов в базе данных")
-        
-        # Проверим, все ли администраторы действительно имеют корректное значение флага is_admin
-        filtered_admins = []
-        for admin in all_admins:
-            if admin.is_admin is None:
-                logging.warning(f"Админ {admin.username} (id={admin.id}) имеет is_admin=None")
-                continue
-                
-            # Преобразуем к bool и проверим значение
-            is_admin_flag = bool(admin.is_admin)
-            if not is_admin_flag:
-                logging.warning(f"Админ {admin.username} (id={admin.id}) имеет некорректное значение is_admin={admin.is_admin}, "
-                              f"после преобразования в bool: {is_admin_flag}")
-                continue
-                
-            filtered_admins.append(admin)
-        
-        logging.info(f"После фильтрации осталось {len(filtered_admins)} администраторов с корректным значением is_admin=True")
-        
-        # Уведомляем всех администраторов из базы данных
-        for admin in filtered_admins:
+        # Отправляем уведомления всем суперадминам
+        notified_count = 0
+        for admin in superadmins:
             try:
                 if admin.telegram_id:
-                    logging.info(f"Проверка админа: id={admin.id}, username={admin.username}, "
-                               f"telegram_id={admin.telegram_id}, is_admin={admin.is_admin}, is_superadmin={admin.is_superadmin}")
-                    
-                    # Логируем SQL-тип значения telegram_id, иногда возможно преобразование требуется
-                    logging.info(f"Тип telegram_id: {type(admin.telegram_id)}, значение: {admin.telegram_id}")
-                    
-                    # Явно преобразуем telegram_id к int и проверяем, что это валидное число
                     try:
+                        # Преобразуем telegram_id к int
                         admin_telegram_id = int(admin.telegram_id)
-                        logging.info(f"Преобразованный telegram_id: {admin_telegram_id} (тип: {type(admin_telegram_id)})")
                         
-                        # Дополнительная проверка на валидность telegram_id
-                        if admin_telegram_id <= 0:
-                            logging.error(f"Некорректный telegram_id: {admin_telegram_id}")
-                            continue
-                            
+                        # Отправляем уведомление
                         await bot.send_message(
                             admin_telegram_id,
                             notification_text
                         )
                         notified_user_telegrams.add(admin_telegram_id)
-                        logging.info(f"✅ Уведомление успешно отправлено администратору {admin.username} (ID: {admin_telegram_id})")
-                    except (ValueError, TypeError) as type_error:
-                        logging.error(f"Ошибка преобразования telegram_id для админа {admin.username}: {type_error}")
+                        notified_count += 1
+                        logging.info(f"✅ Уведомление отправлено суперадмину {admin.username} (ID: {admin_telegram_id})")
+                    except (ValueError, TypeError) as e:
+                        logging.error(f"❌ Ошибка преобразования telegram_id для {admin.username}: {e}")
                 else:
-                    logging.warning(f"У админа {admin.username} (id={admin.id}) отсутствует telegram_id")
+                    logging.warning(f"⚠️ У суперадмина {admin.username} отсутствует telegram_id")
             except Exception as e:
-                logging.error(f"Не удалось отправить уведомление администратору {admin.username}: {e}")
-                logging.error(f"Данные админа: id={admin.id}, telegram_id={admin.telegram_id} (тип: {type(admin.telegram_id)})")
+                logging.error(f"Не удалось отправить уведомление суперадмину {admin.username}: {e}")
         
-        # Если задание найдено и есть создатель, уведомляем его если он ещё не получил уведомление
+        # Получаем создателя задания и отправляем ему уведомление, если он еще не получил его как суперадмин
         if task and task.created_by:
-            # Получаем объект пользователя-создателя задания
             creator = await user_service.get_user_by_id(task.created_by)
-            logging.info(f"Получен создатель задания: {creator}")
-            
-            if creator:
-                logging.info(f"Данные создателя: id={creator.id}, telegram_id={creator.telegram_id}, "
-                           f"username={creator.username}, is_admin={creator.is_admin}")
-                
-                # Проверяем, не получил ли создатель уже уведомление как администратор
-                creator_telegram_id = int(creator.telegram_id) if creator.telegram_id else None
-                
-                if creator_telegram_id and creator_telegram_id not in notified_user_telegrams:
-                    logging.info(f"Отправка уведомления создателю задания {creator.username} (ID: {creator_telegram_id})")
-                    try:
-                        # Отправляем уведомление
+            if creator and creator.telegram_id:
+                try:
+                    creator_telegram_id = int(creator.telegram_id)
+                    
+                    # Проверяем, не получил ли создатель уже уведомление как суперадмин
+                    if creator_telegram_id not in notified_user_telegrams:
                         await bot.send_message(
                             creator_telegram_id,
                             notification_text
                         )
-                        logging.info(f"Уведомление о ссылке отправлено создателю задания #{submission.task_id} "
-                                  f"(ID пользователя: {creator.id}, Telegram ID: {creator_telegram_id})")
-                    except Exception as e:
-                        logging.error(f"Не удалось отправить уведомление создателю задания {creator.username}: {e}")
-                        # Добавляем дополнительную диагностику
-                        logging.error(f"Данные создателя: id={creator.id}, telegram_id={creator_telegram_id} (тип: {type(creator_telegram_id)})")
-                else:
-                    if creator_telegram_id in notified_user_telegrams:
-                        logging.info(f"Создатель задания {creator.username} (ID: {creator_telegram_id}) "
-                                  f"уже получил уведомление как администратор")
-                    else:
-                        logging.error(f"У создателя задания {creator.username} отсутствует telegram_id")
-            else:
-                logging.error(f"Не удалось найти пользователя с ID {task.created_by}")
+                        notified_count += 1
+                        logging.info(f"✅ Уведомление отправлено создателю задания {creator.username} (ID: {creator_telegram_id})")
+                except Exception as e:
+                    logging.error(f"Не удалось отправить уведомление создателю задания {creator.username if creator else 'unknown'}: {e}")
+        
+        logging.info(f"📊 Отправлено уведомлений {notified_count} пользователям (суперадмины + создатель задания)")
         
         await message.answer(
             "✅ Ссылка успешно добавлена. Спасибо!",
@@ -1266,9 +1248,6 @@ async def handle_revision_comment(
             comment=message.text
         )
         
-        # Уведомляем админов
-        from src.config.users import ADMINS
-        
         # Получаем задание, чтобы узнать его создателя
         task_service = TaskService(session)
         task = await task_service.get_task_by_id(submission.task_id)
@@ -1282,39 +1261,35 @@ async def handle_revision_comment(
             f"Комментарий:\n{message.text}"
         )
         
-        # Список администраторов, которые получили уведомление
-        notified_admins = set()
+        # Получаем всех администраторов из базы данных
+        user_service = UserService(session)
+        all_admins = await user_service.get_all_admins()
+        logging.info(f"Найдено {len(all_admins)} администраторов в базе данных")
         
-        # Уведомляем суперадминов
-        for admin in ADMINS:
+        # Отправляем уведомления всем администраторам
+        notified_count = 0
+        for admin in all_admins:
             try:
-                await bot.send_message(
-                    admin["telegram_id"],
-                    notification_text
-                )
-                notified_admins.add(admin["telegram_id"])
+                if admin.telegram_id:
+                    try:
+                        # Преобразуем telegram_id к int
+                        admin_telegram_id = int(admin.telegram_id)
+                        
+                        # Отправляем уведомление
+                        await bot.send_message(
+                            admin_telegram_id,
+                            notification_text
+                        )
+                        notified_count += 1
+                        logging.info(f"✅ Уведомление отправлено администратору {admin.username} (ID: {admin_telegram_id})")
+                    except (ValueError, TypeError) as e:
+                        logging.error(f"❌ Ошибка преобразования telegram_id для {admin.username}: {e}")
+                else:
+                    logging.warning(f"⚠️ У администратора {admin.username} отсутствует telegram_id")
             except Exception as e:
-                logging.error(f"Не удалось отправить уведомление администратору {admin['username']}: {e}")
+                logging.error(f"Не удалось отправить уведомление администратору {admin.username}: {e}")
         
-        # Если задание найдено и есть создатель, уведомляем его
-        if task and task.created_by:
-            # Проверяем, не является ли создатель суперадмином
-            creator_is_superadmin = False
-            for admin in ADMINS:
-                if int(admin["telegram_id"]) == int(task.created_by):
-                    creator_is_superadmin = True
-                    break
-            
-            # Если создатель не суперадмин и ещё не получил уведомление
-            if not creator_is_superadmin and int(task.created_by) not in notified_admins:
-                try:
-                    await bot.send_message(
-                        task.created_by,
-                        notification_text
-                    )
-                    logging.info(f"Уведомление о комментарии отправлено создателю задания #{submission.task_id} (ID: {task.created_by})")
-                except Exception as e:
-                    logging.error(f"Не удалось отправить уведомление создателю задания {task.created_by}: {e}")
+        logging.info(f"📊 Отправлено уведомлений {notified_count} администраторам из {len(all_admins)}")
         
         await message.answer(
             "✅ Комментарий успешно добавлен. Спасибо!",

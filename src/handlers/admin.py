@@ -281,6 +281,15 @@ async def approve_submission(callback: CallbackQuery, session: AsyncSession, use
             await callback.answer("Задание не найдено", show_alert=True)
             return
 
+        # Проверяем права на модерацию (суперадмин или создатель задания)
+        is_superadmin = bool(user.is_superadmin)
+        is_task_creator = submission.task.created_by == user.id
+        
+        if not (is_superadmin or is_task_creator):
+            logging.warning(f"Пользователь {user.id} попытался модерировать не своё задание {submission.task_id}")
+            await callback.answer("У вас нет прав на модерацию этого задания", show_alert=True)
+            return
+
         # Пытаемся одобрить задание
         try:
             submission = await submission_service.approve_submission(submission_id)
@@ -308,17 +317,16 @@ async def approve_submission(callback: CallbackQuery, session: AsyncSession, use
                 message_text,
                 reply_markup=callback.message.reply_markup
             )
-
-        # Отправляем уведомление пользователю
+            
+        # Отправляем уведомление пользователю о статусе публикации
         await send_user_notification(bot, submission)
-
-        # Отправляем сообщение об успешном одобрении как обычное сообщение
-        await callback.message.answer("✅ Задание успешно одобрено")
-        await callback.answer()
-
+        
+        # Сообщаем об успешной операции
+        await callback.answer("Публикация одобрена")
+        
     except Exception as e:
-        logging.error(f"Error approving submission: {e}")
-        await callback.answer("Произошла ошибка при одобрении задания", show_alert=True)
+        logging.error(f"Error in approve_submission: {e}", exc_info=True)
+        await callback.answer("Произошла ошибка при одобрении публикации", show_alert=True)
 
 @router.callback_query(F.data.startswith("request_revision_"))
 async def request_revision(callback: CallbackQuery, state: FSMContext, session: AsyncSession, user: User):
@@ -335,6 +343,15 @@ async def request_revision(callback: CallbackQuery, state: FSMContext, session: 
         
         if not submission:
             await callback.answer("Задание не найдено", show_alert=True)
+            return
+        
+        # Проверяем права на модерацию (суперадмин или создатель задания)
+        is_superadmin = bool(user.is_superadmin)
+        is_task_creator = submission.task.created_by == user.id
+        
+        if not (is_superadmin or is_task_creator):
+            logging.warning(f"Пользователь {user.id} попытался отправить на доработку не своё задание {submission.task_id}")
+            await callback.answer("У вас нет прав на модерацию этого задания", show_alert=True)
             return
             
         # Проверяем возможность отправки на доработку
@@ -682,18 +699,68 @@ async def handle_link_submission(
         # Добавляем ссылку на задание
         submission = await submission_service.add_published_link(submission_id, message.text)
         
-        # Уведомляем админов о получении ссылки (просто информационное сообщение)
-        from src.config.users import ADMINS
-        for admin in ADMINS:
+        # Готовим текст уведомления
+        notification_text = (
+            f"ℹ️ Информация о задании\n"
+            f"Пользователь @{message.from_user.username} отправил ссылку на задание #{submission.task_id}:\n"
+            f"{message.text}"
+        )
+        
+        # Получаем ТОЛЬКО суперадминов из базы данных
+        user_service = UserService(session)
+        superadmins = await user_service.get_superadmins()
+        logging.info(f"Найдено {len(superadmins)} суперадминов в базе данных")
+        
+        # Множество для отслеживания уже уведомленных пользователей
+        notified_user_telegrams = set()
+        
+        # Отправляем уведомления всем суперадминам
+        notified_count = 0
+        for admin in superadmins:
             try:
-                await bot.send_message(
-                    admin["telegram_id"],
-                    f"ℹ️ Информация о задании\n"
-                    f"Пользователь @{message.from_user.username} отправил ссылку на задание #{submission.id}:\n"
-                    f"{message.text}"
-                )
+                if admin.telegram_id:
+                    try:
+                        # Преобразуем telegram_id к int
+                        admin_telegram_id = int(admin.telegram_id)
+                        
+                        # Отправляем уведомление
+                        await bot.send_message(
+                            admin_telegram_id,
+                            notification_text
+                        )
+                        notified_user_telegrams.add(admin_telegram_id)
+                        notified_count += 1
+                        logging.info(f"✅ Уведомление отправлено суперадмину {admin.username} (ID: {admin_telegram_id})")
+                    except (ValueError, TypeError) as e:
+                        logging.error(f"❌ Ошибка преобразования telegram_id для {admin.username}: {e}")
+                else:
+                    logging.warning(f"⚠️ У суперадмина {admin.username} отсутствует telegram_id")
             except Exception as e:
-                logging.error(f"Не удалось отправить уведомление администратору {admin['username']}: {e}")
+                logging.error(f"Не удалось отправить уведомление суперадмину {admin.username}: {e}")
+        
+        # Получаем задание, чтобы узнать его создателя
+        task_service = TaskService(session)
+        task = await task_service.get_task_by_id(submission.task_id)
+        
+        # Получаем создателя задания и отправляем ему уведомление, если он еще не получил его как суперадмин
+        if task and task.created_by:
+            creator = await user_service.get_user_by_id(task.created_by)
+            if creator and creator.telegram_id:
+                try:
+                    creator_telegram_id = int(creator.telegram_id)
+                    
+                    # Проверяем, не получил ли создатель уже уведомление как суперадмин
+                    if creator_telegram_id not in notified_user_telegrams:
+                        await bot.send_message(
+                            creator_telegram_id,
+                            notification_text
+                        )
+                        notified_count += 1
+                        logging.info(f"✅ Уведомление отправлено создателю задания {creator.username} (ID: {creator_telegram_id})")
+                except Exception as e:
+                    logging.error(f"Не удалось отправить уведомление создателю задания {creator.username if creator else 'unknown'}: {e}")
+        
+        logging.info(f"📊 Отправлено уведомлений {notified_count} пользователям (суперадмины + создатель задания)")
         
         await message.answer("✅ Ссылка успешно отправлена!")
         await state.clear()
@@ -899,8 +966,12 @@ async def handle_task_photo(
         await state.clear()
 
 @router.callback_query(F.data.startswith("request_link_"))
-async def request_link(callback: CallbackQuery, session: AsyncSession, bot: Bot):
+async def request_link(callback: CallbackQuery, session: AsyncSession, bot: Bot, user: User):
     try:
+        if not await check_admin(user):
+            await callback.answer("У вас нет прав администратора", show_alert=True)
+            return
+            
         submission_id = int(callback.data.split("_")[-1])
         
         # Получаем задание с данными пользователя
@@ -913,6 +984,15 @@ async def request_link(callback: CallbackQuery, session: AsyncSession, bot: Bot)
             
         if not submission.user:
             await callback.answer("Пользователь не найден", show_alert=True)
+            return
+        
+        # Проверяем права на модерацию (суперадмин или создатель задания)
+        is_superadmin = bool(user.is_superadmin)
+        is_task_creator = submission.task.created_by == user.id
+        
+        if not (is_superadmin or is_task_creator):
+            logging.warning(f"Пользователь {user.id} попытался запросить ссылку для не своего задания {submission.task_id}")
+            await callback.answer("У вас нет прав на модерацию этого задания", show_alert=True)
             return
             
         # Отправляем уведомление пользователю
